@@ -1,0 +1,60 @@
+name: Bug report
+description: Something in msbx (the TUI or `msbx run`) does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the problem also happens with `msb` alone (VM boot, mounts, networking, secrets), please report it to [microsandbox](https://github.com/superradcompany/microsandbox/issues) instead.
+        For security issues, do not open an issue: see [SECURITY.md](https://github.com/finngi/msbx/blob/main/SECURITY.md).
+  - type: input
+    id: msbx-version
+    attributes:
+      label: msbx version
+      description: Release version or commit hash (`git rev-parse --short HEAD` if built from source).
+      placeholder: 0.1.0 or a1b2c3d
+    validations:
+      required: true
+  - type: input
+    id: msb-version
+    attributes:
+      label: microsandbox version
+      description: Output of `msb --version`.
+      placeholder: msb 0.7.11
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 26.1 arm64, or Ubuntu 24.04 x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. cd ~/dev/myapp
+        2. msbx run shell
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and error output
+      description: msbx error output, and `msb logs <name>` if relevant. Remove any secrets.
+      render: text
