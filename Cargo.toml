@@ -1,0 +1,42 @@
+[package]
+name = "msbx"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "An sbx-style TUI and agent launcher for microsandbox microVMs"
+license = "Apache-2.0"
+repository = "https://github.com/finngi/msbx"
+readme = "README.md"
+keywords = ["microsandbox", "sandbox", "tui", "microvm", "agents"]
+categories = ["command-line-utilities", "virtualization"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"
+microsandbox = { version = "=0.7.11", default-features = false, features = ["local", "net"] }
+ratatui = "0.30"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "process", "signal", "time"] }
+
+[dev-dependencies]
+insta = "1.49"
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+dbg_macro = "warn"
+exit = "warn"
+get_unwrap = "warn"
+unwrap_used = "warn"
+print_stdout = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
