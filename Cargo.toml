@@ -20,7 +20,7 @@ microsandbox = { version = "=0.7.11", default-features = false, features = ["loc
 # network-policy types (`Destination`, `DestinationGroup`) needed to summarise a policy.
 microsandbox-types = "=0.7.11"
 ratatui = "0.30"
-tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "process", "signal", "time"] }
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "process", "signal", "sync", "time"] }
 
 [dev-dependencies]
 insta = "1.49"
