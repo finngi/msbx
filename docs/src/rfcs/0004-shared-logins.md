@@ -89,17 +89,17 @@ Config files, sessions and history are all per-sandbox and are never written to 
 - Mount with `.volume("/root/.msbx-login", |m| m.named(name).noexec().nosuid().nodev())`.
 - The SDK auto-creates named volumes only at sandbox create, but checks them on every start. `sandbox::start` must therefore ensure the volume as well as `ensure`.
 - The quota is fixed once the volume exists. Changing the constant later breaks reuse of existing volumes.
-- When bumping the pinned Codex or pi version, check the agent still writes its credential file in place and not by temp file plus rename. A rename would replace the link.
+- When bumping the pinned Codex or pi version, check the agent still writes its credential file in place. A temp file plus rename would replace the link.
 
 ## Drawbacks
 
-This design has no separate list of limits. Its costs and trade-offs are covered in the risk table under [Security](#security) and in [Rationale and alternatives](#rationale-and-alternatives).
+The costs and trade-offs of this design are covered in the risk table under [Security](#security) and in [Rationale and alternatives](#rationale-and-alternatives).
 
 ## Security
 
-- **What is shared:** one credential file per agent. Not config, sessions, history or MCP server logins.
-- **Where the token is stored:** as plain JSON under `~/.microsandbox/volumes/<volume>/` on the host, readable only by your user account. This matches how Codex and pi store logins on Linux by default. Backups of your home folder include it.
-- **Inside the VM:** the agent, and anything it runs, can read the token. This is true of any login made inside a sandbox. The secret proxy cannot hold Codex or pi logins today, because those agents read and refresh their tokens themselves.
+- msbx shares one credential file per agent. Config, sessions, history and MCP server logins stay in each sandbox.
+- The token is stored as plain JSON under `~/.microsandbox/volumes/<volume>/` on the host, readable only by your user account. This matches how Codex and pi store logins on Linux by default. Backups of your home folder include it.
+- Inside the VM, the agent and anything it runs can read the token. This is true of any login made inside a sandbox. The secret proxy cannot hold Codex or pi logins today, because those agents read and refresh their tokens themselves.
 
 | Risk | `agent` scope | `project` scope |
 |---|---|---|
@@ -113,15 +113,15 @@ Advice:
 - `/status` in Codex tells you which account is signed in. Check it if a sandbox acts strangely.
 - If you suspect a sandbox was compromised, revoke the session from your provider account page, then follow "Signing out everywhere".
 
-Claude Code, once added, won't use a volume. You run `claude setup-token` on the host and export `CLAUDE_CODE_OAUTH_TOKEN`. msbx then forwards it through the secret proxy the same way as `OPENAI_API_KEY`, so the token never gets into the VM.
+Claude Code, once added, will use the secret proxy and no volume. You run `claude setup-token` on the host and export `CLAUDE_CODE_OAUTH_TOKEN`, and msbx forwards it the same way as `OPENAI_API_KEY`, so the token never gets into the VM.
 
 ## Rationale and alternatives
 
-- **Named volume holding only the credential file (chosen).** One volume per agent. Each sandbox links the agent's credential file into it. Sessions and config stay in the sandbox, so a compromised project cannot change another project's agent settings. It uses plain msb volumes, so `msb volume ls` and `msb volume rm` already handle listing and signing out everywhere.
-- **Token kept on the host and injected by the secret proxy (rejected for Codex and pi).** This is the safest option, because the token never enters the VM. It does not work today: Codex reads its token locally and refreshes it itself, so new tokens would come back into the VM anyway. microsandbox cannot yet read secrets from a keychain or refresh OAuth tokens. It is the chosen path for Claude Code, whose `setup-token` gives a long-lived token that works with the proxy.
-- **Bind-mounting the host's `~/.codex` (rejected).** Every sandbox could rewrite your real Codex config, including MCP servers and hooks that run on your machine. Every sandbox would also see all your host sessions.
-- **Volume over the whole home or agent folder (rejected).** Simpler, but it shares sessions (which contain project code) and config between projects. That turns one bad repo into a way into all of them.
-- **Not doing it:** users keep signing in again after every recreate, or copy `auth.json` into VMs by hand, which is less safe than a managed volume.
+- Named volume holding only the credential file (chosen): one volume per agent. Each sandbox links the agent's credential file into it. Sessions and config stay in the sandbox, so a compromised project cannot change another project's agent settings. It uses plain msb volumes, so `msb volume ls` and `msb volume rm` already handle listing and signing out everywhere.
+- Token kept on the host and injected by the secret proxy (rejected for Codex and pi): the safest option, because the token never enters the VM. It cannot work today, because Codex reads its token locally and refreshes it itself, so new tokens would come back into the VM anyway. microsandbox cannot yet read secrets from a keychain or refresh OAuth tokens. It is the chosen path for Claude Code, whose `setup-token` gives a long-lived token that works with the proxy.
+- Bind-mounting the host's `~/.codex` (rejected): every sandbox could rewrite your real Codex config, including MCP servers and hooks that run on your machine. Every sandbox would also see all your host sessions.
+- Volume over the whole home or agent folder (rejected): simpler, but it shares sessions (which contain project code) and config between projects, so one bad repo could reach all of them.
+- Doing nothing: users keep signing in again after every recreate, or copy `auth.json` into VMs by hand, which is less safe than a managed volume.
 
 ## Prior art
 

@@ -1,4 +1,4 @@
-# msbx — microsandbox extended
+# msbx: microsandbox extended
 
 A terminal dashboard and one-command agent launcher for [microsandbox](https://github.com/superradcompany/microsandbox) microVMs. Every other command goes straight to `msb`.
 
@@ -8,7 +8,7 @@ A terminal dashboard and one-command agent launcher for [microsandbox](https://g
 
 **Documentation:** <https://finngi.github.io/msbx/>
 
-msbx is an independent project. It is not affiliated with or endorsed by superradcompany or the microsandbox project.
+msbx is an independent project and is not affiliated with or endorsed by superradcompany or the microsandbox project.
 
 ## Why
 
@@ -18,10 +18,10 @@ msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a sin
 
 ## Features
 
-- **`msbx agent`**: one command to start a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
-- **`msbx`**: a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, an Overview tab and a Logs tab.
-- **Everything else is `msb`**: `msbx ls`, `msbx logs NAME`, `msbx run IMAGE` and any other command run `msb` with the same arguments.
-- **Sensible sandbox defaults**:
+- `msbx agent` starts a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
+- `msbx` opens a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, an Overview tab and a Logs tab.
+- `msbx ls`, `msbx logs NAME`, `msbx run IMAGE` and any other command run `msb` with the same arguments.
+- Sandbox defaults:
   - the project folder is mounted at the same path as on the host
   - all host CPUs, with a 32 GiB memory limit
   - public internet plus host services (for example Ollama at `host.microsandbox.internal:11434`)
@@ -110,33 +110,33 @@ msbx exec -t shell-myapp -- bash # msb exec -t shell-myapp -- bash
 
 msbx adds no isolation of its own. Isolation is provided by microsandbox; read its [security documentation](https://github.com/superradcompany/microsandbox/tree/main/docs/security) and [security policy](https://github.com/superradcompany/microsandbox/blob/main/SECURITY.md).
 
-**Isolated:**
+What microsandbox isolates:
 
 - Each sandbox is a separate microVM with its own kernel.
-- Only the project folder is mounted. The rest of the host filesystem is not visible.
-- API keys are not placed in the VM. The VM sees a placeholder, which microsandbox replaces with the real key only on requests to the allowed host.
+- Only the project folder is mounted from the host filesystem.
+- API keys stay on the host. The VM sees a placeholder, which microsandbox replaces with the real key only on requests to the allowed host.
 
-**Not isolated:**
+What it leaves open:
 
-- **The project folder is writable from the VM.** An agent can modify or delete anything in it, including `.git`. Commit or back up first.
-- **Network access is open.** The VM can reach the public internet, so it can send project contents anywhere.
-- **Host services are reachable** at `host.microsandbox.internal`, not only Ollama. Anything listening on the host may be reachable from the VM.
-- **TLS is intercepted when secrets are used.** To substitute keys, microsandbox adds a local CA to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
-- **Secret values live on the host**, in memory and possibly in microsandbox's host-side sandbox configuration (readable only by your user account).
+- The project folder is writable from the VM. An agent can modify or delete anything in it, including `.git`. Commit or back up first.
+- Network access is open. The VM can reach the public internet, so it can send project contents anywhere.
+- Host services are reachable at `host.microsandbox.internal`. Ollama is one of them, and anything else listening on the host may be reachable from the VM too.
+- TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
+- Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox configuration (readable only by your user account).
 
 Report msbx vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Relationship to microsandbox
 
-msbx uses the microsandbox Rust SDK (pinned to 0.7.11) and the `msb` CLI (for attaching and pass-through). It does not fork or patch microsandbox.
+msbx uses an unmodified microsandbox: the Rust SDK (pinned to 0.7.11) and the `msb` CLI (for attaching and pass-through).
 
-msbx keeps no list of `msb` commands: anything it does not define is handed to whichever `msb` is on your `PATH`, so new `msb` commands work through msbx as soon as microsandbox ships them.
+msbx keeps no list of `msb` commands. It hands anything it does not define to whichever `msb` is on your `PATH`, so new `msb` commands work through msbx as soon as microsandbox ships them.
 
 ## Limitations and roadmap
 
 - Three built-in agents (`codex`, `pi`, `shell`); no config file or custom images.
 - Sandbox settings are fixed at creation.
-- No network-log view: the microsandbox SDK has no API for it yet.
+- No network-log view, because the microsandbox SDK has no API for it yet.
 - Later: propose a `msb tui` command or external-subcommand support upstream, so msbx can become part of `msb`.
 
 ## Contributing

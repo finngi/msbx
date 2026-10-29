@@ -5,18 +5,18 @@
 
 ## Summary
 
-msbx mounts your project read/write in the VM, `.git` included. In the VM an agent can write a git hook, or a git setting with a command named in it. Nothing happens inside the VM. The command runs on your Mac, as you, the next time you do a `git commit`, a `git status` or something similar in that folder. That's exactly what the VM is supposed to prevent.
+msbx mounts your project read/write in the VM, `.git` included. In the VM an agent can write a git hook, or a git setting with a command named in it. The command runs on your Mac, as you, the next time you do a `git commit`, a `git status` or something similar in that folder, outside the VM's isolation.
 
-Other tools have shipped this bug:
+Other tools have shipped this bug or now guard against it:
 
-- **Cursor:** CVE-2026-26268, fixed in Cursor 2.5. A sandboxed agent wrote `.git` hooks and config, and git ran them outside the sandbox ([write-up](https://lilting.ch/en/articles/cursor-cve-2026-26268-git-hooks-sandbox-escape)).
-- **A related bypass:** Pillar Security used a git directory not named `.git` together with `core.fsmonitor` ([Pillar Security](https://www.pillar.security/blog/git-directories-do-not-have-to-be-called-git)).
-- **Codex:** keeps `.git`, and the target of a worktree's `gitdir:` file, read-only in its workspace-write sandbox ([Codex sandboxing](https://developers.openai.com/codex/concepts/sandboxing)).
-- **Claude Code:** its sandbox blocks writes to `.git/hooks` and `.git/config`. When it creates a worktree it does not run the repository's own filter drivers, "because a filter driver is a shell command" ([Claude Code worktrees](https://code.claude.com/docs/en/worktrees.md)).
+- Cursor shipped it as CVE-2026-26268, fixed in Cursor 2.5. A sandboxed agent wrote `.git` hooks and config, and git ran them outside the sandbox ([write-up](https://lilting.ch/en/articles/cursor-cve-2026-26268-git-hooks-sandbox-escape)).
+- Pillar Security found a related bypass that used a git directory not named `.git` together with `core.fsmonitor` ([Pillar Security](https://www.pillar.security/blog/git-directories-do-not-have-to-be-called-git)).
+- Codex keeps `.git`, and the target of a worktree's `gitdir:` file, read-only in its workspace-write sandbox ([Codex sandboxing](https://developers.openai.com/codex/concepts/sandboxing)).
+- Claude Code's sandbox blocks writes to `.git/hooks` and `.git/config`. When it creates a worktree it does not run the repository's own filter drivers, "because a filter driver is a shell command" ([Claude Code worktrees](https://code.claude.com/docs/en/worktrees.md)).
 
 ## Motivation
 
-msbx mounts the project, `.git` included, read-write into the VM. An agent there can put in a git hook or a setting such as `core.fsmonitor`, and the next time you use git in that folder on your Mac, git will run it. That defeats the purpose of running the agent in a VM.
+msbx mounts the project, `.git` included, read-write into the VM. An agent there can put in a git hook or a setting such as `core.fsmonitor`, and the next time you use git in that folder on your Mac, git will run it there, outside the VM.
 
 Cursor shipped exactly this bug as CVE-2026-26268, and Codex and Claude Code now guard git data on purpose. Users should know about the risk, msbx itself should never trigger it, and users should be told when it may have happened.
 
@@ -81,7 +81,7 @@ Turn the check off in `~/.config/msbx/config.toml` with `git_guard = false`.
 - Every host git call goes through one helper that adds `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
 - `guard::snapshot(project) -> Fingerprint`:
   - Reads the hooks folder (resolved before the session), the `.git` file or `.git/config`, `config.worktree` and `commondir`.
-  - Stores contents, not hashes, so no new dependency is needed.
+  - Stores full contents, so no hashing dependency is needed.
 - `guard::changes(&before, &after) -> Vec<Change>` is a pure function and unit-tested. Risky keys come from `git config --file <path> --list -z`, which reads only.
 - `main.rs` and the TUI's create/attach both call one shared function: snapshot, `attach::exec`, snapshot, warn.
 - Config key `git_guard` (bool, default `true`).
@@ -91,25 +91,25 @@ Turn the check off in `~/.config/msbx/config.toml` with `git_guard = false`.
 
 ## Drawbacks
 
-- The guard check detects changes. It does not prevent them.
+- The guard check only detects changes, after they are made.
 - The VM keeps running after you detach. Changes made while no session is attached are not caught.
-- In a normal run (not a worktree), `.git` must stay writable or the agent cannot commit, so the read-only layer cannot apply there.
-- Read-only folders mounted inside a writable mount do not help either: the agent is root in the VM and can unmount them.
+- In a normal (non-worktree) run, `.git` must stay writable or the agent cannot commit, so the read-only layer cannot apply there.
+- The agent is root in the VM, so it can unmount read-only folders mounted inside a writable mount.
 - The check knows only the settings listed above.
 - The check does not cover other files that tools on your Mac run: `.husky/`, `.vscode/tasks.json`, `mise.toml` env and hooks, or `package.json` scripts you run yourself.
 
 ## Security
 
-The threat is a prompt-injected agent, or a repo designed to attack you. The VM is your isolation barrier, and this work closes the main known loophole around it. It doesn't make using git on agent-written repos safe in general: review before you run.
+The threat is a prompt-injected agent, or a repo designed to attack you. The VM is your isolation barrier, and this work closes the main known loophole around it. Using git on agent-written repos still carries risk, so review before you run.
 
 ## Rationale and alternatives
 
-- **Guard check (chosen, on by default):** cheap, deterministic and no new dependencies. Works for every run. It detects changes but does not prevent them, and misses changes made while no session is attached.
-- **Read-only `.git` (chosen for worktree runs only):** in a normal run, `.git` must stay writable for commits, and read-only mounts nested inside a writable one can be unmounted by the root agent. In worktree runs the shared git folder can be mounted read-only, and that is enforced on the Mac.
-- **Repository only inside the VM, fetched back (rejected for now):** isolates best. You lose live files on the Mac, and it needs a way to transfer commits back.
-- **Non-root agent (rejected for now):** would make nested read-only mounts hold. But agents expect to install packages, and `.git/config` still has to be writable.
-- **Hardened host git calls (chosen):** small change. Without it, msbx creating a worktree could itself run a planted hook.
-- **Not doing it:** any prompt-injected agent can run code on your Mac with your user account, and the README's security section understates this.
+- Guard check (chosen, on by default): cheap, deterministic and needs no new dependencies. Works for every run. It only detects changes, and it misses changes made while no session is attached.
+- Read-only `.git` (chosen for worktree runs only): in a normal run, `.git` must stay writable for commits, and read-only mounts nested inside a writable one can be unmounted by the root agent. In worktree runs the shared git folder can be mounted read-only, and that is enforced on the Mac.
+- Repository only inside the VM, fetched back (rejected for now): isolates best. You lose live files on the Mac, and it needs a way to transfer commits back.
+- Non-root agent (rejected for now): would make nested read-only mounts hold. But agents expect to install packages, and `.git/config` still has to be writable.
+- Hardened host git calls (chosen): small change. Without it, msbx creating a worktree could itself run a planted hook.
+- Doing nothing: any prompt-injected agent can run code on your Mac with your user account, and the README's security section understates this.
 
 ## Prior art
 
@@ -121,7 +121,7 @@ The threat is a prompt-injected agent, or a repo designed to attack you. The VM 
 ## Unresolved questions
 
 - Should the guard keep a stored baseline, so changes made while no session is attached are caught at the next launch?
-- Which settings belong on the risky list? It needs a short reviewed list, not every config key.
+- Which settings belong on the risky list? It needs a short reviewed list of config keys.
 - Should the TUI also run the check and show a badge on the card?
 - Should repositories using husky (`core.hooksPath` inside the project) get a specific note, since their hooks are always writable from the VM?
 

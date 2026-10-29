@@ -18,8 +18,8 @@ One paragraph: what changes, for whom.
 
 ## Motivation
 
-The problem users have today, with concrete use cases. Explain why it belongs in msbx rather
-than in microsandbox or `msb` (see the scope rule in CONTRIBUTING.md).
+The problem users have today, with concrete use cases. Explain why it belongs in msbx and not
+in microsandbox or `msb` (see the scope rule in CONTRIBUTING.md).
 
 ## Guide-level explanation
 
@@ -35,7 +35,7 @@ source you checked), corner cases, and the tests that will cover it.
 
 ## Drawbacks
 
-Why should we not do this? Include maintenance cost and added surface.
+The case against doing this, including maintenance cost and added surface.
 
 ## Security
 

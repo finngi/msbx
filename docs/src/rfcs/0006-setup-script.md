@@ -5,7 +5,7 @@
 
 ## Summary
 
-A project can ship a `.msbx/setup.sh`. msbx runs it in the sandbox after the agent is installed, and runs it again if the file changes. A new sandbox then gets your project's toolchain automatically, without you doing anything.
+A project can ship a `.msbx/setup.sh`. msbx runs it in the sandbox after the agent is installed, and runs it again if the file changes. A new sandbox then gets your project's toolchain automatically.
 
 ## Motivation
 
@@ -18,7 +18,7 @@ A script committed with the project lets a fresh sandbox be ready to go on first
 - Put your setup steps in `.msbx/setup.sh`: apt packages, language toolchains, `mise install`, anything a shell can do.
 - It runs on the first `msbx agent` launch, and on later launches only if the file changed.
 - You see its output live.
-- If it fails, the agent does not start: you get the exit code and the last 40 lines of output. The next launch tries again.
+- If it fails, the agent does not start. msbx shows the exit code and the last 40 lines of output, and the next launch tries again.
 - When the file has changed since the last run, msbx shows the diff before running it.
 
 ## Reference-level explanation
@@ -37,7 +37,7 @@ flowchart LR
 
 - msbx copies the script inside the VM and runs the copy with `bash`, as root, in the project folder.
 - On success, the copy is kept as the "last successful run".
-- Comparing against that copy is how msbx knows the file changed, so it never hashes the file.
+- msbx detects a change by comparing the file against that copy, so it needs no hash.
 - Running a copy means an edit made while the script runs cannot slip in.
 
 Example using mise, which many projects already use for tool versions:
@@ -78,24 +78,24 @@ To disable it for all projects, add `setup = false` to `~/.config/msbx/config.to
 ## Drawbacks
 
 - One script per project, run with `bash`. A shebang line is ignored.
-- It runs on launches through `msbx agent` and the TUI. It does not run if you `msb exec` into the sandbox directly.
+- It runs only on launches through `msbx agent` and the TUI, so a direct `msb exec` into the sandbox skips it.
 - Removing the script does not undo what it installed. Remove the sandbox with `msb rm -f NAME` for a clean start.
 - msbx does not read `devcontainer.json`, and does not run `mise install` on its own.
 
 ## Security
 
 - The script comes from the repository, so in a cloned repository someone else wrote it.
-- It runs only inside the VM, with the same access the agent already has there: root, with the same network. msbx therefore does not ask for confirmation.
+- It runs only inside the VM, with the same access the agent already has there: root, with the same network, so msbx runs it without asking for confirmation.
 - msbx shows the diff whenever the script changes, so you can see what an agent or a pull changed.
-- msbx never runs anything from `.msbx/` on your Mac. This is also why it does not support devcontainer's `initializeCommand`, which runs on the host.
+- msbx never runs anything from `.msbx/` on your Mac. For the same reason it leaves out devcontainer's `initializeCommand`, which runs on the host.
 
 ## Rationale and alternatives
 
-- **`.msbx/setup.sh` (chosen):** one plain shell script that can do anything: apt, mise, language toolchains. It re-runs only when its content changes, which msbx detects by comparing against the copy kept from the last successful run. No new dependencies.
-- **`devcontainer.json` (rejected):** the spec is large, and partial support would confuse users. Its `initializeCommand` runs on the host, which msbx must never do.
-- **Automatic `mise install` (rejected for now):** msbx would have to install and pin mise in the VM and put its tools on the agent's PATH, and some tools need build dependencies. A project can call mise from `setup.sh` instead (README recipe). We may revisit after real use.
-- **Configured in the repository (rejected):** settings stay user-level in `~/.config/msbx/config.toml`. The only per-project file is the script.
-- **Not doing it:** users keep reinstalling toolchains by hand, and sandboxes drift apart.
+- `.msbx/setup.sh` (chosen): one plain shell script for anything (apt, mise, language toolchains). It re-runs only when its content changes, which msbx detects by comparing against the copy kept from the last successful run. It needs no new dependencies.
+- `devcontainer.json` (rejected): the spec is large, and partial support would confuse users. Its `initializeCommand` runs on the host, which msbx must never do.
+- Automatic `mise install` (rejected for now): msbx would have to install and pin mise in the VM and put its tools on the agent's PATH, and some tools need build dependencies. A project can call mise from `setup.sh` instead (README recipe). We may revisit after real use.
+- Configured in the repository (rejected): settings stay user-level in `~/.config/msbx/config.toml`. The only per-project file is the script.
+- Doing nothing: users keep reinstalling toolchains by hand, and sandboxes drift apart.
 
 ## Prior art
 

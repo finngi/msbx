@@ -1,11 +1,11 @@
 # How msbx works with microsandbox
 
-msbx is a thin layer. It does not fork or patch microsandbox, and it does not run a daemon of
-its own. It talks to microsandbox in two ways:
+msbx is a thin layer over an unmodified microsandbox, and it runs no daemon of its own. It talks
+to microsandbox in two ways:
 
-- the **microsandbox Rust SDK** (pinned to 0.7.11) to list, create, start, stop and remove
+- the microsandbox Rust SDK (pinned to 0.7.11) to list, create, start, stop and remove
   sandboxes, read their logs and metrics, and run the one-time agent install;
-- the **`msb` CLI** on your `PATH` to attach a terminal (`msb exec -t`) and for every command msbx
+- the `msb` CLI on your `PATH` to attach a terminal (`msb exec -t`) and for every command msbx
   does not define.
 
 ```mermaid
@@ -28,8 +28,8 @@ flowchart LR
 
 ## Why attach through `msb`
 
-`msb exec -t` already handles the PTY, terminal resizing and raw mode. msbx runs it with your
-terminal attached instead of reimplementing that. The dashboard suspends itself while you are
+`msb exec -t` already handles the PTY, terminal resizing and raw mode, so msbx runs it with your
+terminal attached. The dashboard suspends itself while you are
 attached and redraws when `msb` exits.
 
 ## Why pass everything else through
@@ -40,7 +40,7 @@ through msbx as soon as microsandbox ships them, and msbx never has to track `ms
 
 ## Finding the runtime
 
-The SDK looks for its runtime through `MSB_PATH` or `~/.microsandbox/bin`, not `PATH`. Homebrew
+The SDK looks for its runtime only through `MSB_PATH` or `~/.microsandbox/bin`. Homebrew
 installs `bin/msb` as a wrapper around `libexec/msb`, so msbx resolves the `msb` on your `PATH`
 and points the SDK at the matching runtime binary. If you set `MSB_PATH`, it wins.
 

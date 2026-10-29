@@ -4,15 +4,15 @@ Thanks for helping. msbx is small on purpose, so please read the scope rule befo
 
 ## Scope
 
-msbx does only what microsandbox's `msb` CLI lacks: the TUI (`msbx`) and `msbx agent`. Every other command (`ls`, `logs`, `stop`, `rm`, `exec`, `run` and so on) is passed to `msb` unchanged; msbx does not wrap, reimplement or list them.
+msbx does only what microsandbox's `msb` CLI lacks: the TUI (`msbx`) and `msbx agent`. Every other command (`ls`, `logs`, `stop`, `rm`, `exec`, `run` and so on) is passed to `msb` unchanged, and msbx has no code or list for them.
 
 If a feature belongs in the runtime, the SDK or `msb` itself, propose it upstream in [microsandbox](https://github.com/superradcompany/microsandbox) instead. For anything larger than a small fix, open an issue first so we can agree on the approach.
 
 ## Where to report bugs
 
-- **msbx bugs** (TUI, `msbx agent`, sandbox naming or defaults): [open an issue here](https://github.com/finngi/msbx/issues/new/choose).
-- **microsandbox bugs** (VM boot, mounts, networking, secrets, `msb` commands): report them in [microsandbox's issues](https://github.com/superradcompany/microsandbox/issues). If you can reproduce it with `msb` alone, it is upstream.
-- **Security issues**: do not open a public issue. See [SECURITY.md](SECURITY.md).
+- msbx bugs (TUI, `msbx agent`, sandbox naming or defaults): [open an issue here](https://github.com/finngi/msbx/issues/new/choose).
+- microsandbox bugs (VM boot, mounts, networking, secrets, `msb` commands): report them in [microsandbox's issues](https://github.com/superradcompany/microsandbox/issues). If you can reproduce it with `msb` alone, it is upstream.
+- Security issues: do not open a public issue. See [SECURITY.md](SECURITY.md).
 
 ## Development setup
 
@@ -46,7 +46,7 @@ cargo test -- --ignored
 
 ### Snapshot tests
 
-The TUI is tested with [insta](https://insta.rs) snapshots rendered through ratatui's `TestBackend`. After changing the UI, review the new snapshots rather than accepting them blindly:
+The TUI is tested with [insta](https://insta.rs) snapshots rendered through ratatui's `TestBackend`. After changing the UI, review each new snapshot before you accept it:
 
 ```sh
 cargo install --locked cargo-insta   # once

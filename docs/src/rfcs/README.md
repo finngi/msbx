@@ -1,6 +1,6 @@
 # RFCs
 
-Here are the plans for msbx's next features. Each feature has its own page and tracking issue. These are all proposals. Feel free to comment on the issues before or during the work.
+These pages are proposals for msbx's next features. Each feature has its own page and tracking issue. Comment on the issues before or during the work.
 
 msbx stays a thin layer on top of microsandbox. A feature goes in msbx only if `msb` doesn't already do it, and any unknown command is still passed straight to `msb`.
 
@@ -59,12 +59,12 @@ flowchart LR
 
 ## Decisions so far
 
-- **Config lives in your home folder only.** There is no per-repo config file, because an agent can write to the project folder and could change its own settings.
-- **Secrets are never stored.** Config names environment variables. microsandbox reads the value when a sandbox starts and swaps it in on the way out, so the VM only sees a placeholder.
-- **Logins are shared per agent by default.** You can switch to per project, or off, for repos you don't trust.
-- **Agent sessions attach through the microsandbox SDK** while the dashboard is suspended. This gives a clean redraw on reattach and frees the session straight away when a terminal closes.
-- **Ports are forwarded live while msbx is open.** This uses a lower-level microsandbox API, which is fine because msbx pins an exact microsandbox version.
+- Config lives only in your home folder. A per-repo config file would let an agent change its own settings, because it can write to the project folder.
+- msbx never stores secrets. Config names environment variables. microsandbox reads the value when a sandbox starts and swaps it in on the way out, so the VM only sees a placeholder.
+- Logins are shared per agent by default. You can switch to per project, or off, for repos you don't trust.
+- Agent sessions attach through the microsandbox SDK while the dashboard is suspended. This gives a clean redraw on reattach and frees the session straight away when a terminal closes.
+- Ports are forwarded live while msbx is open. This uses a lower-level microsandbox API, which is safe to rely on because msbx pins an exact microsandbox version.
 
 ## What we checked
 
-Every page is based on reading the microsandbox 0.7.11 source (not only its docs) and studying the other open-source tools built on microsandbox. Where microsandbox can't do something yet (say, logging allowed connections, or changing a running sandbox's network policy), the page says so instead of hacking around it.
+Every page is based on reading the microsandbox 0.7.11 source as well as its docs, and on studying the other open-source tools built on microsandbox. Where microsandbox can't do something yet (say, logging allowed connections, or changing a running sandbox's network policy), the page says so and does not work around it.

@@ -9,7 +9,7 @@ Press `p` on a sandbox for a list of the ports its programs are listening on. Pr
 
 ## Motivation
 
-Agents often start a dev server inside the sandbox, and the user then wants to open it in a browser. The only built-in way, publishing a port with `msb modify`, needs a restart, and restarting stops the agent and the very server you're publishing.
+Agents often start a dev server inside the sandbox, and the user then wants to open it in a browser. The only built-in way, publishing a port with `msb modify`, needs a restart, and restarting stops the agent and the server you're publishing.
 
 Published ports also can't reach servers bound only to localhost in the sandbox, which is how a lot of dev servers are set up by default. A live forward from the TUI is a one-key fix for the common case.
 
@@ -30,7 +30,7 @@ Published ports also can't reach servers bound only to localhost in the sandbox,
 ╰────────────────────────────────────────────────╯
 ```
 
-For example, the agent launches a dev server on port 3000. You hit `p`, then `f`, and go to http://localhost:3000 in your browser.
+For example, the agent launches a dev server on port 3000. You press `p`, then `f`, and open http://localhost:3000 in your browser.
 
 ## Reference-level explanation
 
@@ -64,7 +64,7 @@ msbx modify codex-api -p 8080:80 --restart
 msbx modify codex-api --port-rm 8080 --restart
 ```
 
-If you want the change to apply the next time the sandbox starts, use `--next-start` instead of `--restart`.
+If you want the change to apply the next time the sandbox starts, replace `--restart` with `--next-start`.
 
 ### Implementation notes
 
@@ -77,25 +77,25 @@ If you want the change to apply the next time the sandbox starts, use `--next-st
 ## Drawbacks
 
 - Publishing a port needs a restart. That stops the sandbox, which ends the agent session and every process inside it, including the server you wanted to publish.
-- A published port connects to the sandbox's network address, not to its localhost. Many dev servers, Vite among them, listen only on localhost by default, so a published port can't reach them. Use a forward instead, or start the server with `--host 0.0.0.0`.
+- A published port connects to the sandbox's network address, so it can't reach servers that listen only on localhost. Many dev servers, Vite among them, do that by default. Use a forward instead, or start the server with `--host 0.0.0.0`.
 - Forwards are TCP only. They stop when msbx quits and are not recreated after the sandbox restarts.
-- The port list shows every listening port in the sandbox, not which program opened it.
-- Forwarding uses microsandbox's internal agent protocol, which is not a stable public API. msbx pins its microsandbox version for this reason.
+- The port list shows every listening port in the sandbox, without the program that opened it.
+- Forwarding uses microsandbox's internal agent protocol, which can change between releases. msbx pins its microsandbox version for this reason.
 
 ## Security
 
-- msbx forwards only on 127.0.0.1, never 0.0.0.0, so other machines on your network can't reach a forward. If a published port is bound to anything other than 127.0.0.1, Overview shows it in red.
+- msbx forwards only on 127.0.0.1, so other machines on your network can't reach a forward. If a published port is bound to anything other than 127.0.0.1, Overview shows it in red.
 - Any program on your machine can connect to a forwarded port, as with any local dev server. On a shared machine, that includes other users.
 - A sandbox with `host = true` can reach your machine's 127.0.0.1, so it can reach your forwards and published ports, including another sandbox's. Set `host = false` for sandboxes that don't need it.
 - If the port is already in use, msbx leaves it alone and uses a free port chosen by the OS.
 
 ## Rationale and alternatives
 
-- **Live forward (chosen):** works immediately, needs no restart, and reaches servers on the sandbox's localhost. The costs: it stops when msbx quits, and it relies on microsandbox's internal agent protocol, which is why we pin the version.
-- **Publish with restart, from the TUI:** it lasts, but stops everything running in the sandbox and can't reach localhost-only servers. It already exists as `msbx modify -p … --restart`, so a TUI button would add little.
-- **A relay such as socat or nc inside the sandbox:** this still needs a published port (so still a restart), or one `msb exec` process per connection. It also needs a tool that the base image does not include.
-- **Showing the ports in Overview:** cheap, and it tells users what is already published and whether a restart is pending.
-- **Not doing it:** users have to restart sandboxes, losing agent sessions, or tell the agent to restart its server on 0.0.0.0, and still can't reach localhost-only servers.
+- Live forward (chosen): works immediately, needs no restart, and reaches servers on the sandbox's localhost. Its costs are that it stops when msbx quits and relies on microsandbox's internal agent protocol, which is why we pin the version.
+- Publish with restart, from the TUI: it lasts, but stops everything running in the sandbox and can't reach localhost-only servers. It already exists as `msbx modify -p … --restart`, so a TUI button would add little.
+- A relay such as socat or nc inside the sandbox: this still needs a published port (so still a restart), or one `msb exec` process per connection. It also needs a tool that the base image does not include.
+- Showing the ports in Overview: cheap, and it tells users what is already published and whether a restart is pending.
+- Doing nothing: users have to restart sandboxes, losing agent sessions, or tell the agent to restart its server on 0.0.0.0, and still can't reach localhost-only servers.
 
 ## Prior art
 
@@ -108,7 +108,7 @@ If you want the change to apply the next time the sandbox starts, use `--next-st
 
 - Should forwards be remembered and recreated the next time msbx starts, or stay strictly per session?
 - When the same port is taken on the host, should we try the next ports up, or let the OS pick one?
-- Should we warn when a listener is bound only to the sandbox's localhost and the user tries to publish it instead of forwarding?
+- Should we warn when a listener is bound only to the sandbox's localhost and the user tries to publish it when a forward would work?
 - How stable is TcpConnect across microsandbox releases, and is it worth asking upstream for a supported port-forward API?
 - Is there demand for UDP forwards?
 

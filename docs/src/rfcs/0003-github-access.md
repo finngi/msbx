@@ -5,7 +5,7 @@
 
 ## Summary
 
-Agents in msbx sandboxes can clone, pull and push to GitHub over HTTPS. Your token stays on your Mac. Only a placeholder ever appears in the sandbox. The microsandbox network proxy puts the actual token in place of the placeholder, and only on requests to `github.com` and `api.github.com`.
+Agents in msbx sandboxes can clone, pull and push to GitHub over HTTPS. Your token stays on your Mac, and the sandbox sees only a placeholder. The microsandbox network proxy replaces the placeholder with the token only on requests to `github.com` and `api.github.com`.
 
 ## Motivation
 
@@ -20,7 +20,7 @@ microsandbox can already keep a secret on the host and insert it only on request
 - The `gh` CLI works if it is installed in the sandbox, because it reads `GH_TOKEN`.
 - Commits use your git name and email from the host, unless you set `[git]` in the config.
 - The dashboard shows which repository the sandbox can reach, for example `github  finngi/msbx · GH_TOKEN (host-side)`.
-- Nothing changes until you set `MSBX_GITHUB_TOKEN`. If it is unset in a GitHub repository, msbx prints a link for creating a token.
+- GitHub access stays off until you set `MSBX_GITHUB_TOKEN`. If it is unset in a GitHub repository, msbx prints a link for creating a token.
 
 ### Setup
 
@@ -35,9 +35,9 @@ microsandbox can already keep a secret on the host and insert it only on request
    ```sh
    export MSBX_GITHUB_TOKEN="$(security find-generic-password -a "$USER" -s msbx-github -w 2>/dev/null)"
    ```
-4. Open a new terminal and run `msbx agent codex`. A sandbox created before you set the token has no GitHub access: remove it with `msb rm -f <name>` first.
+4. Open a new terminal and run `msbx agent codex`. A sandbox created before you set the token has no GitHub access, so remove it with `msb rm -f <name>` first.
 
-You also need to set the variable in any shell you use for `msb start` on that sandbox. Without it the sandbox won't start. If you'd rather remove GitHub access from the sandbox, run `msb modify <name> --secret-rm GH_TOKEN`.
+Set the variable in any shell you use for `msb start` on that sandbox too, because the sandbox won't start without it. To remove GitHub access from the sandbox, run `msb modify <name> --secret-rm GH_TOKEN`.
 
 Other choices, in `~/.config/msbx/config.toml`:
 
@@ -94,7 +94,7 @@ Details:
   - `safe.directory=<project>`
   - `user.name` and `user.email`
 - Add the label `msbx.github=<owner/repo>` and the field `SandboxInfo.github` for the dashboard row.
-- Why only environment variables: the SDK reads `SecretSource::Env` in the process that starts the VM, store-backed sources are unsupported, and `set_var` needs `unsafe`, which the crate forbids.
+- msbx uses only environment variables because the SDK reads `SecretSource::Env` in the process that starts the VM, store-backed sources are unsupported, and `set_var` needs `unsafe`, which the crate forbids.
 - Tests:
   - unit tests for `repo_slug` (https, scp-style and `ssh://` forms), `guest_git_env` and `token_link`
   - a snapshot of the dashboard row
@@ -106,19 +106,19 @@ Details:
 
 ## Drawbacks
 
-This design has no separate list of limits. Its costs and trade-offs are covered under [Security](#security) ("What this does not stop") and [Rationale and alternatives](#rationale-and-alternatives).
+The costs and trade-offs of this design are covered under [Security](#security) ("Remaining risks") and [Rationale and alternatives](#rationale-and-alternatives).
 
 ## Security
 
-- **What the agent can do with the token.** Anything the token allows on the selected repositories. That includes pushing to any branch, force-pushing, deleting branches and opening pull requests.
-- **Protect your default branch** with a ruleset: require pull requests, and block force pushes and deletions. See https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets
-- **Grant only what the agent needs.** Contents and Pull requests are enough. Leave everything else unselected, including the Workflows permission. GitHub recommends choosing "the minimal permissions necessary" and setting an expiry: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
-- **Keep the 30-day expiry.** To rotate, update the Keychain item. The new token is used the next time the sandbox starts.
-- **The token cannot be read inside the sandbox.** Code there sees only the placeholder. The proxy blocks any request that carries the placeholder to a host other than GitHub. The one exception is the agent's own API host (for example `api.openai.com`), which may receive the unchanged placeholder so that chat messages quoting it are not blocked. It never receives the token.
-- **What this does not stop:**
+- The agent can do anything the token allows on the selected repositories, including pushing to any branch, force-pushing, deleting branches and opening pull requests.
+- Protect your default branch with a ruleset that requires pull requests and blocks force pushes and deletions. See https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets
+- Grant only what the agent needs: Contents and Pull requests. Leave everything else unselected, including the Workflows permission. GitHub recommends choosing "the minimal permissions necessary" and setting an expiry: https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens
+- Keep the 30-day expiry. To rotate, update the Keychain item. The new token is used the next time the sandbox starts.
+- Code in the sandbox sees only the placeholder. The proxy blocks any request that carries the placeholder to a host other than GitHub. The one exception is the agent's own API host (for example `api.openai.com`), which may receive the unchanged placeholder so that chat messages quoting it go through. It never receives the token.
+- Remaining risks:
   - The agent can still send your code to any host the network settings allow.
   - The agent can write to the project's `.git` folder, including hooks and local git config, and git on your Mac runs those. After an agent session, check `.git/hooks` and `git config --local --list` before running git on the host.
-- **The opt-in `gh` token** can reach every repository you can. Its default scopes include `repo`, `read:org` and `gist`, and some logins also have `workflow`. Use it only for sandboxes you trust.
+- The opt-in `gh` token can reach every repository you can. Its default scopes include `repo`, `read:org` and `gist`, and some logins also have `workflow`. Use it only for sandboxes you trust.
 
 ## Rationale and alternatives
 
@@ -129,13 +129,13 @@ This design has no separate list of limits. Its costs and trade-offs are covered
 | GitHub App installation token | Create an App, manage its key, refresh every hour | The repositories the App is installed on | No |
 | Forward your SSH agent into the sandbox | Install socat in the sandbox | Every key in your agent and every server those keys open | No |
 
-- **Fine-grained token for selected repositories (chosen default):** one-time setup (msbx prints a prefilled link; you pick the repositories and store the token). Damage from a misbehaving agent is limited to those repositories and the permissions you grant. It works for both pull and push over HTTPS.
-- **The `gh` login token (opt-in only):** no setup, but it can reach every repository you can, and often gists, organization data and CI workflows. That is too much for a default given to an agent that may be prompt-injected.
-- **GitHub App installation token (not now):** short-lived, organization-friendly tokens, but it needs an App, a private key and an hourly refresh, while microsandbox reads the secret only when the sandbox starts.
-- **SSH agent forwarding (rejected):** it works over vsock, but exposes every key in your agent and every server those keys reach. GitHub's access controls cannot narrow it, and the proxy cannot see or filter it.
-- **Copying the token into the sandbox (rejected):** simplest, but any code in the sandbox can read it and send it anywhere.
-- **Configuring git through environment variables, not files:** the repository's `.git/config` is shared with your Mac, so writing a credential helper there would change your host git too.
-- **Not doing it:** agents stay unable to push, and users work around it by pasting tokens into sandboxes, which is the unsafe option above.
+- Fine-grained token for selected repositories (chosen default): one-time setup (msbx prints a prefilled link; you pick the repositories and store the token). Damage from a misbehaving agent is limited to those repositories and the permissions you grant. It works for both pull and push over HTTPS.
+- The `gh` login token (opt-in only): no setup, but it can reach every repository you can, and often gists, organization data and CI workflows. That is too much for a default given to an agent that may be prompt-injected.
+- GitHub App installation token (not now): short-lived, organization-friendly tokens, but it needs an App, a private key and an hourly refresh, while microsandbox reads the secret only when the sandbox starts.
+- SSH agent forwarding (rejected): it works over vsock, but exposes every key in your agent and every server those keys reach. GitHub's access controls cannot narrow it, and the proxy cannot see or filter it.
+- Copying the token into the sandbox (rejected): simplest, but any code in the sandbox can read it and send it anywhere.
+- Configuring git through environment variables: the repository's `.git/config` is shared with your Mac, so writing a credential helper there would change your host git too.
+- Doing nothing: agents stay unable to push, and users work around it by pasting tokens into sandboxes, which is the unsafe option above.
 
 ## Prior art
 
@@ -149,7 +149,7 @@ This design has no separate list of limits. Its costs and trade-offs are covered
 ## Unresolved questions
 
 - Should msbx read the token itself, from the Keychain or a command like Docker's `--command 'gh auth token'`? That would remove the shell profile line, but msbx would have to restart itself with the variable set, and plain `msb start` would still need it.
-- Should a placeholder sent to a non-GitHub host stop the sandbox, not just block the request?
+- Should a placeholder sent to a non-GitHub host stop the sandbox as well as block the request?
 - Does git in the default image trust the proxy's certificate without extra setup? The integration test must confirm this.
 - Should the default image include `gh` so agents can open pull requests?
 - Is GitHub Enterprise (other hosts) worth supporting, and how would the allowed hosts be configured?

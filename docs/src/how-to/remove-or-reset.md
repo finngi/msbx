@@ -1,8 +1,7 @@
 # Remove or reset a sandbox
 
-msbx has no remove command of its own: `msbx rm`, `msbx stop` and the rest are passed straight
-to `msb`. Removing a sandbox deletes the VM and anything installed in it. Your project folder
-is on the host and is not touched.
+msbx passes `msbx rm`, `msbx stop` and the rest straight to `msb`. Removing a sandbox deletes the VM and anything installed in it. Your project folder
+is on the host and stays as it is.
 
 ## Remove one sandbox
 
