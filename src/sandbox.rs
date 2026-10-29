@@ -198,10 +198,6 @@ fn last_lines(text: &str, count: usize) -> Vec<String> {
 }
 
 /// Every sandbox the local runtime knows about, msbx-created or not.
-#[allow(
-    dead_code,
-    reason = "used by the TUI, which lands in a separate change"
-)]
 pub(crate) async fn list() -> Result<Vec<SandboxInfo>> {
     // Metrics only decorate the list; a failure to read them must not hide the sandboxes.
     let metrics = microsandbox::all_sandbox_metrics()
@@ -322,10 +318,6 @@ fn network_summary(network: &NetworkSpec) -> String {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the TUI, which lands in a separate change"
-)]
 pub(crate) async fn start(name: &str) -> Result<()> {
     let sandbox = Sandbox::start_detached(name)
         .await
@@ -335,10 +327,6 @@ pub(crate) async fn start(name: &str) -> Result<()> {
 }
 
 /// Stops gracefully; on timeout returns an error and leaves the VM running rather than killing it.
-#[allow(
-    dead_code,
-    reason = "used by the TUI, which lands in a separate change"
-)]
 pub(crate) async fn stop(name: &str) -> Result<()> {
     let handle = get(name).await?;
     stop_handle(&handle).await
@@ -351,10 +339,6 @@ async fn stop_handle(handle: &SandboxHandle) -> Result<()> {
         .with_context(|| format!("stopping sandbox {}", handle.name()))
 }
 
-#[allow(
-    dead_code,
-    reason = "used by the TUI, which lands in a separate change"
-)]
 pub(crate) async fn remove(name: &str) -> Result<()> {
     let handle = get(name).await?;
     if handle.status_snapshot().has_active_runtime_state() {
@@ -367,10 +351,6 @@ pub(crate) async fn remove(name: &str) -> Result<()> {
 }
 
 /// The last `max_lines` lines of the sandbox's captured output.
-#[allow(
-    dead_code,
-    reason = "used by the TUI, which lands in a separate change"
-)]
 pub(crate) async fn logs(name: &str, max_lines: usize) -> Result<Vec<String>> {
     let handle = get(name).await?;
     // Entries are output chunks holding at least one line each, so this tail is enough.
@@ -520,7 +500,6 @@ mod tests {
 
     static SECRET_AGENT: Agent = Agent {
         id: "secret",
-        name: "Secret test",
         install: "true",
         command: "true",
         secrets: &[agents::Secret {

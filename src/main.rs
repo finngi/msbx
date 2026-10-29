@@ -1,11 +1,10 @@
 mod agents;
+mod app;
 mod attach;
-#[allow(
-    dead_code,
-    reason = "shared with the TUI, which reads these fields in a separate change"
-)]
 mod model;
 mod sandbox;
+mod tui;
+mod ui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -48,9 +47,25 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<u8> {
-    let Some(Command::Run { agent, path, args }) = cli.command else {
-        bail!("the TUI isn't built yet; use `msbx run`");
-    };
+    match cli.command {
+        None => {
+            let project = project_folder(None)?;
+            sandbox::use_runtime(&attach::msb_path()?);
+            tui::run(project, std::env::home_dir()).await?;
+            Ok(0)
+        }
+        Some(Command::Run { agent, path, args }) => {
+            let project = project_folder(path)?;
+            sandbox::use_runtime(&attach::msb_path()?);
+            let agent = agent.agent();
+            let name = sandbox::ensure(agent, &project).await?;
+            attach::exec(&name, agent.command, &args).await
+        }
+    }
+}
+
+/// The canonical project folder, so the TUI and `msbx run` name and label sandboxes alike.
+fn project_folder(path: Option<PathBuf>) -> Result<PathBuf> {
     let path = match path {
         Some(path) => path,
         None => std::env::current_dir().context("reading the current directory")?,
@@ -61,9 +76,5 @@ async fn run(cli: Cli) -> Result<u8> {
     if !project.is_dir() {
         bail!("{} is not a directory", project.display());
     }
-
-    sandbox::use_runtime(&attach::msb_path()?);
-    let agent = agent.agent();
-    let name = sandbox::ensure(agent, &project).await?;
-    attach::exec(&name, agent.command, &args).await
+    Ok(project)
 }
