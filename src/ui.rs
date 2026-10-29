@@ -384,7 +384,7 @@ fn render_create(frame: &mut Frame, app: &App, agent_index: usize) {
         Line::from(choices),
         Line::default(),
         row("project", shorten_home(&app.project, app.home.as_deref())),
-        row("name", name_preview(agent, &app.project)),
+        row("name", (app.sandbox_name)(agent, &app.project)),
         Line::default(),
         Line::from(vec![
             "←→".bold(),
@@ -429,24 +429,6 @@ fn bar(percent: f64, width: u16) -> String {
         "▮".repeat(filled),
         "▯".repeat(usize::from(width) - filled)
     )
-}
-
-/// Display-only preview; sandbox.rs owns the real naming rules.
-fn name_preview(agent: &str, project: &Path) -> String {
-    let folder = project
-        .file_name()
-        .map_or_else(|| "project".into(), |name| name.to_string_lossy());
-    let folder: String = folder
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!("{agent}-{folder}")
 }
 
 fn shorten_home(path: &Path, home: Option<&Path>) -> String {
@@ -552,15 +534,6 @@ mod tests {
         assert_eq!(shorten_home(Path::new("/srv/api"), None), "/srv/api");
     }
 
-    #[test]
-    fn previews_sandbox_name() {
-        assert_eq!(
-            name_preview("codex", Path::new("/x/My App")),
-            "codex-my-app"
-        );
-        assert_eq!(name_preview("pi", Path::new("/")), "pi-project");
-    }
-
     fn info(name: &str, status: Status) -> SandboxInfo {
         SandboxInfo {
             name: name.to_owned(),
@@ -584,6 +557,7 @@ mod tests {
             PathBuf::from("/home/dev/dev/xap/api"),
             Some(PathBuf::from("/home/dev")),
             vec!["codex", "pi", "shell"],
+            crate::tui::preview_name,
         );
         let running = SandboxInfo {
             agent: Some("codex".to_owned()),
@@ -637,7 +611,12 @@ mod tests {
 
     #[test]
     fn snapshot_empty() {
-        let app = App::new(PathBuf::from("/home/dev/api"), None, vec!["codex"]);
+        let app = App::new(
+            PathBuf::from("/home/dev/api"),
+            None,
+            vec!["codex"],
+            crate::tui::preview_name,
+        );
         insta::assert_snapshot!(draw(&app, 100, 30).backend());
     }
 

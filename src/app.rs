@@ -1,6 +1,6 @@
 //! TUI state and key handling. Pure: side effects are returned as [`Action`]s for the event loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -64,10 +64,18 @@ pub(crate) struct App {
     /// Passed in rather than read from the environment so rendering stays deterministic.
     pub(crate) home: Option<PathBuf>,
     pub(crate) agents: Vec<&'static str>,
+    /// The sandbox name `msbx run` would use for an agent id and project. Injected so the create
+    /// popup cannot disagree with the real naming while this module stays free of the SDK.
+    pub(crate) sandbox_name: fn(&str, &Path) -> String,
 }
 
 impl App {
-    pub(crate) fn new(project: PathBuf, home: Option<PathBuf>, agents: Vec<&'static str>) -> Self {
+    pub(crate) fn new(
+        project: PathBuf,
+        home: Option<PathBuf>,
+        agents: Vec<&'static str>,
+        sandbox_name: fn(&str, &Path) -> String,
+    ) -> Self {
         Self {
             sandboxes: Vec::new(),
             selected: 0,
@@ -78,6 +86,7 @@ impl App {
             project,
             home,
             agents,
+            sandbox_name,
         }
     }
 
@@ -101,6 +110,16 @@ impl App {
             None if on_new_card => self.sandboxes.len(),
             None => self.selected.min(self.sandboxes.len()),
         };
+    }
+
+    /// Shows logs loaded for `name`, unless the selection moved on while they were loading.
+    pub(crate) fn set_logs(&mut self, name: &str, logs: Vec<String>) {
+        if self
+            .selected_sandbox()
+            .is_some_and(|sandbox| sandbox.name == name)
+        {
+            self.logs = logs;
+        }
     }
 
     pub(crate) fn update(&mut self, key: KeyEvent) -> Option<Action> {
@@ -245,6 +264,7 @@ mod tests {
             PathBuf::from("/work/api"),
             None,
             vec!["codex", "pi", "shell"],
+            crate::tui::preview_name,
         );
         app.set_sandboxes(vec![
             sandbox("a", Status::Running),
@@ -481,6 +501,18 @@ mod tests {
         let mut release = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert_eq!(app.update(release), None);
+    }
+
+    #[test]
+    fn set_logs_applies_only_to_the_selected_sandbox() {
+        let mut app = app();
+        app.set_logs("b", vec![name("stale")]);
+        assert_eq!(app.logs, Vec::<String>::new());
+        app.set_logs("a", vec![name("fresh")]);
+        assert_eq!(app.logs, [name("fresh")]);
+        app.selected = 3;
+        app.set_logs("a", vec![name("late")]);
+        assert_eq!(app.logs, [name("fresh")], "the + new card shows no logs");
     }
 
     #[test]

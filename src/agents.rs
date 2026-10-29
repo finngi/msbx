@@ -1,5 +1,7 @@
 //! The agents msbx knows how to launch. Adding one is a new `static` plus an `AgentId` variant.
 
+use clap::ValueEnum;
+
 /// OCI image every agent sandbox boots from.
 pub(crate) const IMAGE: &str = "node:24-bookworm-slim";
 
@@ -15,18 +17,13 @@ pub(crate) struct Secret {
 pub(crate) struct Agent {
     /// Stable identifier used in sandbox names, labels and the CLI.
     pub(crate) id: &'static str,
-    #[allow(
-        dead_code,
-        reason = "shown by the TUI, which lands in a separate change"
-    )]
-    pub(crate) name: &'static str,
     /// Runs once as root inside a fresh sandbox.
     pub(crate) install: &'static str,
     pub(crate) command: &'static str,
     pub(crate) secrets: &'static [Secret],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum AgentId {
     Codex,
     Pi,
@@ -43,9 +40,13 @@ impl AgentId {
     }
 }
 
+/// The agent with this id, as stored in the `msbx.agent` label.
+pub(crate) fn find(id: &str) -> Option<&'static Agent> {
+    AgentId::from_str(id, false).ok().map(AgentId::agent)
+}
+
 static CODEX: Agent = Agent {
     id: "codex",
-    name: "Codex",
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
               && npm install -g @openai/codex@0.148.0",
     command: "codex",
@@ -57,7 +58,6 @@ static CODEX: Agent = Agent {
 
 static PI: Agent = Agent {
     id: "pi",
-    name: "Pi",
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
               && npm install -g @earendil-works/pi-coding-agent@1.4.0",
     command: "pi",
@@ -67,7 +67,6 @@ static PI: Agent = Agent {
 
 static SHELL: Agent = Agent {
     id: "shell",
-    name: "Shell",
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl",
     command: "bash",
     secrets: &[],
@@ -95,7 +94,6 @@ pub(crate) fn select_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::ValueEnum;
 
     #[test]
     fn agent_ids_match_cli_names() {
@@ -121,6 +119,14 @@ mod tests {
             Ok(&SHELL)
         );
         assert!(AgentId::from_str("claude", false).is_err());
+    }
+
+    #[test]
+    fn find_resolves_ids_and_rejects_unknown() {
+        assert_eq!(find("codex"), Some(&CODEX));
+        assert_eq!(find("shell"), Some(&SHELL));
+        assert_eq!(find("Codex"), None, "labels are written lowercase");
+        assert_eq!(find("claude"), None);
     }
 
     #[test]
