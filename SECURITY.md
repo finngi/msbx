@@ -27,7 +27,7 @@ In scope: msbx's own code, for example:
 
 - the sandbox configuration msbx creates (mounts, network profile, secret bindings)
 - handling of API keys before they are passed to microsandbox
-- the TUI and `msbx run` acting on the wrong sandbox or the wrong path
+- the TUI and `msbx agent` acting on the wrong sandbox or the wrong path
 
 Out of scope here: the isolation boundary itself. Sandbox escape, isolation bypass between sandboxes, network-policy bypass and secret leakage inside the runtime are microsandbox vulnerabilities. Report them to microsandbox as described in its [security policy](https://github.com/superradcompany/microsandbox/blob/main/SECURITY.md).
 
