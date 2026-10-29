@@ -1,4 +1,7 @@
 mod agents;
+// Nothing outside tests uses these until tui.rs wires the event loop.
+#[cfg_attr(not(test), allow(dead_code))]
+mod app;
 mod attach;
 #[allow(
     dead_code,
@@ -6,6 +9,8 @@ mod attach;
 )]
 mod model;
 mod sandbox;
+#[cfg_attr(not(test), allow(dead_code))]
+mod ui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

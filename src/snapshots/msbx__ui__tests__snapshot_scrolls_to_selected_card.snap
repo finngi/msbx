@@ -1,0 +1,20 @@
+---
+source: src/ui.rs
+expression: "draw(&app, 100, 16).backend()"
+---
+"msbx   microVM sandboxes for coding agents · microsandbox                                     ? help"
+"                                                                                                    "
+"┌────────────────────────────────┐  New sandbox                                                     "
+"│ ● scratch                      │                                                                  "
+"│ —                              │  Press ↵ or c to create a sandbox for                            "
+"│ —                              │  ~/dev/xap/api                                                   "
+"│ cpu —  mem —                   │                                                                  "
+"│ stop    exec    remove         │                                                                  "
+"└────────────────────────────────┘                                                                  "
+"┌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐                                                                  "
+"╎       + new sandbox  (c)       ╎                                                                  "
+"└╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘                                                                  "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"↑↓ select  tab pane  ↵ attach  c create  s start/stop  x shell  r remove  ? help  q quit            "
