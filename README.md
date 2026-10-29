@@ -6,7 +6,7 @@ A terminal dashboard and one-command agent launcher for [microsandbox](https://g
 
 > **Status:** early, pre-1.0. Expect breaking changes. microsandbox itself is beta software.
 
-**Documentation:** <https://finngi.github.io/msbx/>
+The documentation is at <https://finngi.github.io/msbx/>.
 
 msbx is an independent project and is not affiliated with or endorsed by superradcompany or the microsandbox project.
 

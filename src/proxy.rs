@@ -292,6 +292,10 @@ async fn log_loop(
             }
             _ = ticks.tick() => flush(&mut log, &path).await?,
             _ = shutdown.changed() => {
+                // Record what is already queued: connections that ended just before the stop.
+                while let Ok(event) = events.try_recv() {
+                    log.record(&event.sandbox, &event.host, event.port, event.allowed, &event.rule, now());
+                }
                 flush(&mut log, &path).await?;
                 return Ok(());
             }

@@ -157,6 +157,17 @@ impl App {
         };
     }
 
+    /// Selects the card for `name`, if it is listed; otherwise leaves the selection alone.
+    pub(crate) fn select_named(&mut self, name: &str) {
+        if let Some(index) = self
+            .sandboxes
+            .iter()
+            .position(|sandbox| sandbox.name == name)
+        {
+            self.selected = index;
+        }
+    }
+
     /// Shows logs loaded for `name`, unless the selection moved on while they were loading.
     pub(crate) fn set_logs(&mut self, name: &str, logs: Vec<String>) {
         if self
@@ -445,6 +456,19 @@ mod tests {
 
     fn name(value: &str) -> String {
         value.to_owned()
+    }
+
+    #[test]
+    fn select_named_moves_to_a_listed_sandbox_only() {
+        let mut app = app();
+        app.select_named("b");
+        assert_eq!(app.selected_sandbox().map(|s| s.name.as_str()), Some("b"));
+        app.select_named("not-listed");
+        assert_eq!(
+            app.selected_sandbox().map(|s| s.name.as_str()),
+            Some("b"),
+            "an unknown name keeps the selection"
+        );
     }
 
     #[test]

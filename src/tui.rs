@@ -43,6 +43,12 @@ enum Step {
 
 #[derive(Debug, PartialEq)]
 enum Job {
+    /// Creates (or starts) the agent's sandbox in the background; the dashboard stays up and
+    /// ↵ attaches once it is ready.
+    Create {
+        agent: &'static Agent,
+        project: PathBuf,
+    },
     Start(String),
     Stop(String),
     Remove(String),
@@ -51,18 +57,8 @@ enum Job {
 
 #[derive(Debug, PartialEq)]
 enum Foreground {
-    Attach {
-        name: String,
-        agent: &'static Agent,
-    },
-    Exec {
-        name: String,
-        command: &'static str,
-    },
-    Create {
-        agent: &'static Agent,
-        project: PathBuf,
-    },
+    Attach { name: String, agent: &'static Agent },
+    Exec { name: String, command: &'static str },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -93,6 +89,8 @@ enum Message {
         entries: Vec<NetEntry>,
     },
     Status(String),
+    /// A sandbox the user just created; select its card once it is listed.
+    Created(String),
 }
 
 /// Input plus periodic refresh. Dropping it stops both, so while the TUI is suspended nothing
@@ -248,7 +246,7 @@ fn step(action: Action, sandboxes: &[SandboxInfo]) -> Result<Step> {
             let agent = agent_of(sandboxes, &name)?;
             Step::Suspend(Foreground::Attach { name, agent })
         }
-        Action::Create { agent, project } => Step::Suspend(Foreground::Create {
+        Action::Create { agent, project } => Step::Job(Job::Create {
             agent: agents::find(&agent).with_context(|| format!("unknown agent {agent}"))?,
             project,
         }),
@@ -346,6 +344,11 @@ fn agent_of(sandboxes: &[SandboxInfo], name: &str) -> Result<&'static Agent> {
 /// Stopping can take seconds, so say that something is happening.
 fn progress(job: &Job) -> Option<String> {
     match job {
+        Job::Create { agent, project } => Some(format!(
+            "creating {}… (the first run installs {})",
+            sandbox::sandbox_name(agent, project),
+            agent.id
+        )),
         Job::Start(name) => Some(format!("starting {name}…")),
         Job::Stop(name) => Some(format!("stopping {name}…")),
         Job::Remove(name) => Some(format!("removing {name}…")),
@@ -361,6 +364,24 @@ async fn run_job(job: Job, sender: UnboundedSender<Message>, dirs: Dirs) {
             let _ = sender.send(Message::Logs { name, logs });
             return;
         }
+        Job::Create { agent, project } => {
+            let notes = sender.clone();
+            let notify = move |note: String| {
+                let _ = notes.send(Message::Status(note));
+            };
+            let created = create(agent, &project, &dirs, &notify).await;
+            let _ = sender.send(Message::Sandboxes(sandbox::list().await));
+            let _ = match created {
+                Ok(name) => {
+                    let _ = sender.send(Message::Status(format!(
+                        "created {name}; press ↵ to attach"
+                    )));
+                    sender.send(Message::Created(name))
+                }
+                Err(error) => sender.send(Message::Status(format!("{error:#}"))),
+            };
+            return;
+        }
         Job::Start(name) => (start(&name, &dirs).await, "started", name),
         Job::Stop(name) => (sandbox::stop(&name).await, "stopped", name),
         Job::Remove(name) => (sandbox::remove(&name).await, "removed", name),
@@ -371,6 +392,17 @@ async fn run_job(job: Job, sender: UnboundedSender<Message>, dirs: Dirs) {
     };
     let _ = sender.send(Message::Status(status));
     let _ = sender.send(Message::Sandboxes(sandbox::list().await));
+}
+
+/// Creates (or starts) the sandbox without attaching. Like `start`, it needs the proxy first.
+async fn create(
+    agent: &'static Agent,
+    project: &Path,
+    dirs: &Dirs,
+    notify: sandbox::Notify<'_>,
+) -> Result<String> {
+    proxy::ensure_running(dirs).await?;
+    sandbox::ensure(agent, project, notify).await
 }
 
 /// A started sandbox dials the proxy at once, so make sure one is there first.
@@ -394,6 +426,7 @@ fn apply(app: &mut App, message: Message) {
             app.status_line = Some(format!("{error:#}"));
         }
         Message::Status(status) => app.status_line = Some(status),
+        Message::Created(name) => app.select_named(&name),
     }
 }
 
@@ -420,18 +453,12 @@ async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
     let (name, code) = match foreground {
         Foreground::Attach { name, agent } => {
             proxy::ensure_running(dirs).await?;
-            sandbox::prepare_existing(&name, agent).await?;
+            sandbox::prepare_existing(&name, agent, &|note| eprintln!("{note}")).await?;
             let code = attach::exec(&name, agent.command, &[]).await?;
             (name, code)
         }
         Foreground::Exec { name, command } => {
             let code = attach::exec(&name, command, &[]).await?;
-            (name, code)
-        }
-        Foreground::Create { agent, project } => {
-            proxy::ensure_running(dirs).await?;
-            let name = sandbox::ensure(agent, &project).await?;
-            let code = attach::exec(&name, agent.command, &[]).await?;
             (name, code)
         }
     };
@@ -711,10 +738,11 @@ mod tests {
                 agent: name("pi"),
                 project: project.clone(),
             })?,
-            Step::Suspend(Foreground::Create {
+            Step::Job(Job::Create {
                 agent: AgentId::Pi.agent(),
                 project: project.clone(),
-            })
+            }),
+            "creating stays on the dashboard; ↵ attaches later"
         );
         let unknown = step_for(Action::Create {
             agent: name("claude"),

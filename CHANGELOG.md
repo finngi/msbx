@@ -10,6 +10,8 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Added
 
+- `msbx agent -d` creates or starts the agent's sandbox without attaching.
+
 - `msbx agent <codex|pi|shell> [PATH] [-- ARGS]`: create or reuse a per-project sandbox named `<agent>-<folder>` and attach to it.
 - Sandbox defaults: project bind-mounted at the same path, all host CPUs, 32 GiB memory limit, public internet plus host services, agent API keys injected host-side, `node:24-bookworm-slim` image with the agent installed once.
 - `msbx` terminal dashboard: sandbox cards, Overview and Logs tabs, and keys to attach, open a shell, create, start/stop and remove sandboxes.
@@ -25,7 +27,13 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Changed
 
+- Creating a sandbox from the dashboard no longer attaches. The dashboard stays open, shows progress on the status line and selects the new card; press `Enter` to attach.
+- The Network tab tells sandboxes msbx did not create apart from ones created before network policy.
 - Sandbox network defaults: deny by default, DNS and the Ollama and LM Studio ports to the host, public TCP through the proxy. Sandboxes created earlier keep `public + host` and ignore the policy.
 - `msbx run` is renamed `msbx agent`; `msbx run` now passes through to `msb run`.
+
+### Fixed
+
+- `msbx proxy stop` no longer drops connections logged just before it stopped.
 
 [unreleased]: https://github.com/finngi/msbx/commits/main

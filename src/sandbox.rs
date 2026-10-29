@@ -18,6 +18,10 @@ use crate::agents::{self, Agent, Login};
 use crate::model::{SandboxInfo, Status};
 use crate::{models, proxy};
 
+/// Where progress and notes from setting up a sandbox go: stderr for the CLI, the status line
+/// for the TUI (which must not print over its own screen).
+pub(crate) type Notify<'a> = &'a (dyn Fn(String) + Send + Sync);
+
 const LABEL_AGENT: &str = "msbx.agent";
 const LABEL_PROJECT: &str = "msbx.project";
 /// `proxy` marks sandboxes created to use the msbx proxy, so `policy.toml` applies to them.
@@ -105,7 +109,7 @@ fn sanitise(folder: &str) -> String {
 /// first use, and returns the sandbox name. The VM keeps running after this returns.
 ///
 /// `project` must be absolute; it is mounted and used as the working directory at the same path.
-pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
+pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) -> Result<String> {
     let name = sandbox_name(agent, project);
     let project_path = project
         .to_str()
@@ -119,10 +123,10 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
     let static_policy = proxied_policy()?;
     let (secrets, missing) = agents::select_secrets(agent, |var| std::env::var(var).ok());
     for var in missing {
-        eprintln!(
+        notify(format!(
             "note: {var} is not set on the host; not forwarding it to {name} \
              (export it, or store it with `msbx secret set {var}`)"
-        );
+        ));
     }
     let mut builder = Sandbox::builder(&name)
         .image(agents::IMAGE)
@@ -163,7 +167,7 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         .await
         .with_context(|| format!("starting sandbox {name}"))?;
 
-    let prepared = prepare(&sandbox, agent, &name).await;
+    let prepared = prepare(&sandbox, agent, &name, notify).await;
     // A detached sandbox's handle never owns the VM, so releasing it leaves the VM running.
     sandbox.detach().await;
     prepared.map(|()| name)
@@ -187,22 +191,22 @@ fn proxied_policy() -> Result<NetworkPolicy> {
 
 /// Starts the agent's existing sandbox if needed and refreshes its login link and models, for
 /// the TUI's attach, which skips `ensure`.
-pub(crate) async fn prepare_existing(name: &str, agent: &Agent) -> Result<()> {
+pub(crate) async fn prepare_existing(name: &str, agent: &Agent, notify: Notify<'_>) -> Result<()> {
     ensure_login_volume_for(name).await?;
     let sandbox = get(name)
         .await?
         .connect_or_start_detached()
         .await
         .with_context(|| format!("connecting to sandbox {name}"))?;
-    let prepared = prepare(&sandbox, agent, name).await;
+    let prepared = prepare(&sandbox, agent, name, notify).await;
     sandbox.detach().await;
     prepared
 }
 
-async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
-    install_once(sandbox, agent, name).await?;
-    link_login(sandbox, agent, name).await?;
-    write_models(sandbox, agent, name).await
+async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str, notify: Notify<'_>) -> Result<()> {
+    install_once(sandbox, agent, name, notify).await?;
+    link_login(sandbox, agent, name, notify).await?;
+    write_models(sandbox, agent, name, notify).await
 }
 
 /// The named volume holding the agent's sign-in, shared by all its sandboxes; `None` for
@@ -253,7 +257,12 @@ async fn ensure_login_volume_for(name: &str) -> Result<()> {
 
 /// Links the agent's credential file to the login volume, keeping a sign-in the agent made
 /// since the last start. Sandboxes created before the volume existed get a note instead.
-async fn link_login(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+async fn link_login(
+    sandbox: &Sandbox,
+    agent: &Agent,
+    name: &str,
+    notify: Notify<'_>,
+) -> Result<()> {
     let Some(login) = &agent.login else {
         return Ok(());
     };
@@ -264,11 +273,11 @@ async fn link_login(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> 
     match output.status().code {
         0 => Ok(()),
         LOGIN_NOT_MOUNTED => {
-            eprintln!(
+            notify(format!(
                 "note: {name} was created without a login volume, so its {} sign-in is not \
                  shared; recreate it with `msb rm -f {name}`",
                 agent.id
-            );
+            ));
             Ok(())
         }
         code => bail!(
@@ -307,7 +316,12 @@ fn login_script(login: &Login) -> String {
 }
 
 /// Writes pi's `models.json` for the host's local model servers, or says why there is none.
-async fn write_models(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+async fn write_models(
+    sandbox: &Sandbox,
+    agent: &Agent,
+    name: &str,
+    notify: Notify<'_>,
+) -> Result<()> {
     let Some(guest_path) = agent.models_file else {
         return Ok(());
     };
@@ -316,11 +330,11 @@ async fn write_models(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()
         .await
         .context("looking for local model servers")??;
     let Some(json) = json else {
-        eprintln!(
+        notify(format!(
             "note: no local model server found on the host (Ollama on 11434, LM Studio on \
              1234), so {} in {name} has no models configured",
             agent.id
-        );
+        ));
         return Ok(());
     };
     let output = sandbox
@@ -372,7 +386,12 @@ fn host_cpus() -> u8 {
     u8::try_from(cores).unwrap_or(u8::MAX)
 }
 
-async fn install_once(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+async fn install_once(
+    sandbox: &Sandbox,
+    agent: &Agent,
+    name: &str,
+    notify: Notify<'_>,
+) -> Result<()> {
     let probe = sandbox
         .shell(format!("test -f {INSTALL_MARKER}"))
         .await
@@ -381,7 +400,10 @@ async fn install_once(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()
         return Ok(());
     }
 
-    eprintln!("installing {} in {name} (first run only)...", agent.id);
+    notify(format!(
+        "installing {} in {name} (first run only)...",
+        agent.id
+    ));
     let script = format!("set -e\n{}\ntouch {INSTALL_MARKER}", agent.install);
     let output = sandbox
         .shell(script)
@@ -598,6 +620,14 @@ async fn get(name: &str) -> Result<SandboxHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "matches the Notify signature, which hands each note over"
+    )]
+    fn print_note(note: String) {
+        eprintln!("{note}");
+    }
     use crate::agents::AgentId;
     use microsandbox_types::{NetworkPolicy as StoredPolicy, PortRange, Protocol, Rule};
 
@@ -737,7 +767,7 @@ mod tests {
         let project = project.canonicalize()?;
         let agent = AgentId::Shell.agent();
 
-        let created = ensure(agent, &project).await;
+        let created = ensure(agent, &project, &print_note).await;
         let outcome = async {
             let name = created?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -907,7 +937,7 @@ mod tests {
         let volume = login_volume(&LOGIN_AGENT).context("login agent has a volume")?;
         let host_models = models::guest_models_json()?;
 
-        let name = ensure(&LOGIN_AGENT, &project).await?;
+        let name = ensure(&LOGIN_AGENT, &project, &print_note).await?;
         // Boxed: the many awaits make this future too large for clippy's stack budget.
         let outcome = Box::pin(async {
             let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -932,7 +962,7 @@ mod tests {
             }
 
             // The second ensure moves the fresh sign-in into the volume and restores the link.
-            ensure(&LOGIN_AGENT, &project).await?;
+            ensure(&LOGIN_AGENT, &project, &print_note).await?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
             let second = sandbox
                 .shell(
@@ -979,7 +1009,7 @@ mod tests {
         std::fs::create_dir_all(&project)?;
         let project = project.canonicalize()?;
 
-        let name = ensure(&SECRET_AGENT, &project).await?;
+        let name = ensure(&SECRET_AGENT, &project, &print_note).await?;
         let outcome = async {
             let handle = Sandbox::get(&name).await?;
             let stored = format!(
@@ -1059,7 +1089,7 @@ mod tests {
             .join("proj");
         std::fs::create_dir_all(&project)?;
         let project = project.canonicalize()?;
-        let name = ensure(&NET_AGENT, &project).await?;
+        let name = ensure(&NET_AGENT, &project, &print_note).await?;
         let outcome = Box::pin(async {
             let config = Sandbox::get(&name).await?.config()?;
             let stored = config.spec.network.policy.context("policy stored")?;
