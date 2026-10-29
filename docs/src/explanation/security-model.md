@@ -15,14 +15,47 @@ and [security policy](https://github.com/superradcompany/microsandbox/blob/main/
 
 - The project folder is writable from the VM. An agent can modify or delete anything in it,
   including `.git`. Commit or back up first.
-- Network access is open. The VM can reach the public internet, so it can send project
-  contents anywhere.
-- Host services are reachable at `host.microsandbox.internal`. Ollama is one of them, and
-  anything else listening on the host may be reachable from the VM too.
+- Network access follows your policy (see below). With the `open` preset the VM can reach the
+  public internet and send project contents anywhere. With any preset, an allowed host can
+  still receive data.
+- Host services: only ports 11434 (Ollama) and 1234 (LM Studio) at
+  `host.microsandbox.internal`, fixed when the sandbox is created.
 - TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA
   to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
 - Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox
   configuration (readable only by your user account).
+
+## Network policy and the proxy
+
+Every msbx sandbox sends its public TCP traffic through the msbx proxy on `127.0.0.1:47447`,
+which applies `~/.config/msbx/policy.toml` per connection
+([how-to](../how-to/control-network-access.md), [RFC 0008](../rfcs/0008-network.md)).
+
+What it stops:
+
+- Connections to hosts your policy does not allow, by the name in the TLS handshake or the HTTP
+  `Host` header. The name only counts when it resolves on your machine to the address the VM
+  connected to, so a guest cannot borrow an allowed name for another server.
+- Spoofed sandbox names: the proxy accepts only the token in
+  `~/.local/state/msbx/proxy-token` (mode 600), so other local processes cannot pass as a
+  sandbox.
+- Private networks, loopback, link-local and cloud metadata addresses, denied by the static
+  policy in the sandbox before the proxy is involved.
+
+What it does not stop:
+
+- DNS: the sandbox can resolve any name through microsandbox's gateway.
+- Data leaving through an allowed host, such as `github.com` under `balanced`.
+- Host access beyond the two model ports being fixed at create; the proxy cannot change it,
+  because traffic to your machine bypasses the proxy.
+- Traffic with no name in its first bytes (plain TCP, or a server-first protocol such as
+  SSH) is decided by the address alone.
+- A legitimate connection blocked as `name-mismatch` when DNS answers differ between the VM and
+  your machine.
+
+The proxy binds loopback only, never logs payloads or credentials, and its log holds host
+names, ports, counts and times in `~/.local/state/msbx/network-log.json`. The unauthenticated
+status request reveals the msbx version, pid and policy path to local processes.
 
 ## Keychain keys
 

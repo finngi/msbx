@@ -1,20 +1,21 @@
 ---
 source: src/ui.rs
+assertion_line: 892
 expression: "draw(&app, 60, 20).backend()"
 ---
 "msbx                                                  ? help"
 "                                                            "
 "┌────────────────────────────────┐  codex-api               "
-"│ ● codex-api                    │  Overview   Logs         "
+"│ ● codex-api                    │  Overview   Logs   Networ"
 "│ codex                 ↵ attach │  ────────────────────────"
 "│ ~/dev/xap/api                  │  status   running · up 12"
 "│ ╭ New sandbox ─────────────────────────────────────────╮▯▯"
 "│ │                                                      │  "
-"└─│  agent     codex   pi   shell                        │  "
-"┌─│                                                      │Y "
-"│ │  project  ~/dev/xap/api                              │/x"
-"│ │  name     codex-api                                  │or"
-"│ │                                                      │  "
+"└─│  agent     codex   pi   shell                        │ed"
+"┌─│                                                      │  "
+"│ │  project  ~/dev/xap/api                              │Y "
+"│ │  name     codex-api                                  │/x"
+"│ │                                                      │or"
 "│ │  ←→ agent  ↵ create  esc cancel                      │  "
 "│ ╰──────────────────────────────────────────────────────╯  "
 "└────────────────────────────────┘                          "

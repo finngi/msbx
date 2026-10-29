@@ -46,9 +46,12 @@ run `msbx agent pi` again after starting it.
 
 ## If it does not connect
 
-- The sandbox must have the `host` network profile. Sandboxes created by msbx do; check with
-  `msbx inspect <name>` or the dashboard's Overview tab (`network  public + host`).
+- The sandbox must be allowed to reach the host port. Sandboxes created by msbx may reach ports
+  11434 and 1234 on the host and nothing else there; a server on another port needs a sandbox
+  created with that port, which msbx does not offer yet. Sandboxes created before the network
+  policy existed have the whole `host` profile (`network  public + host` on the Overview tab).
 - `localhost` inside the VM is the VM itself. Use `host.microsandbox.internal` to reach your Mac.
 
-Any service listening on your host is reachable this way. See the
+Host access is fixed when the sandbox is created; the network policy does not change it. See
+[Control network access](control-network-access.md) and the
 [security model](../explanation/security-model.md).

@@ -10,7 +10,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
 
 use crate::app::{App, Popup, Tab};
-use crate::model::{SandboxInfo, Status};
+use crate::model::{NetEntry, SandboxInfo, Status};
+use crate::policy::Preset;
 
 const ACCENT: Color = Color::Cyan;
 const CARDS_WIDTH: u16 = 34;
@@ -27,6 +28,14 @@ const KEYS: [(&str, &str); 9] = [
     ("r", "remove"),
     ("?", "help"),
     ("q", "quit"),
+];
+/// Keys that only work on the Network tab.
+const NETWORK_KEYS: [(&str, &str); 5] = [
+    ("←→", "row"),
+    ("a", "allow"),
+    ("A", "allow all"),
+    ("d", "deny"),
+    ("p", "preset"),
 ];
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
@@ -49,6 +58,7 @@ pub(crate) fn render(frame: &mut Frame, app: &App) {
         Some(Popup::Create { agent_index }) => render_create(frame, app, *agent_index),
         Some(Popup::ConfirmRemove { name }) => render_confirm_remove(frame, name),
         Some(Popup::Help) => render_help(frame),
+        Some(Popup::Preset { index, then_create }) => render_preset(frame, *index, *then_create),
         None => {}
     }
 }
@@ -63,10 +73,19 @@ fn render_header(frame: &mut Frame, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hints = KEYS
-        .iter()
-        .map(|(key, label)| Line::from(vec![key.bold(), format!(" {label}  ").dim()]))
-        .collect();
+    let hint = |(key, label): &(&'static str, &'static str)| {
+        Line::from(vec![key.bold(), format!(" {label}  ").dim()])
+    };
+    let hints = if app.tab == Tab::Network {
+        KEYS[..2]
+            .iter()
+            .chain(&NETWORK_KEYS)
+            .chain(&KEYS[7..])
+            .map(hint)
+            .collect()
+    } else {
+        KEYS.iter().map(hint).collect()
+    };
     let status = app
         .status_line
         .as_deref()
@@ -260,8 +279,9 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         rule,
     );
     let lines = match app.tab {
-        Tab::Overview => overview(sandbox),
+        Tab::Overview => overview(sandbox, app.policy),
         Tab::Logs => log_tail(&app.logs, content.height),
+        Tab::Network => network_tab(app, sandbox, content.height),
     };
     frame.render_widget(Paragraph::new(lines), content);
 }
@@ -278,10 +298,12 @@ fn tab_line(active: Tab) -> Line<'static> {
         tab("Overview", Tab::Overview),
         "   ".into(),
         tab("Logs", Tab::Logs),
+        "   ".into(),
+        tab("Network", Tab::Network),
     ])
 }
 
-fn overview(sandbox: &SandboxInfo) -> Vec<Line<'static>> {
+fn overview(sandbox: &SandboxInfo, policy: Option<Preset>) -> Vec<Line<'static>> {
     let word = status_word(sandbox.status);
     let status = match sandbox.uptime {
         Some(uptime) => format!("{word} · up {}", format_duration(uptime)),
@@ -299,13 +321,21 @@ fn overview(sandbox: &SandboxInfo) -> Vec<Line<'static>> {
     } else {
         format!("{} (host-side)", sandbox.secrets.join(", "))
     };
+    let network = if sandbox.proxied {
+        format!("policy {} (proxied)", preset_word(policy))
+    } else {
+        or_dash(sandbox.network.clone())
+    };
     let mut lines = vec![
         row("status", status),
         row("cpu", cpu),
         row("memory", memory(sandbox, " / ")),
-        row("network", or_dash(sandbox.network.clone())),
-        row("secrets", secrets),
+        row("network", network),
     ];
+    if let Some(traffic) = traffic(sandbox) {
+        lines.push(row("traffic", traffic));
+    }
+    lines.push(row("secrets", secrets));
     let mounts = if sandbox.mounts.is_empty() {
         vec!["—".to_owned()]
     } else {
@@ -316,6 +346,75 @@ fn overview(sandbox: &SandboxInfo) -> Vec<Line<'static>> {
     }
     lines.push(row("image", or_dash(sandbox.image.clone())));
     lines
+}
+
+fn preset_word(policy: Option<Preset>) -> &'static str {
+    policy.map_or("not initialised", Preset::name)
+}
+
+/// `↓ 48.2M  ↑ 3.1M` from the runtime's metrics, when it reports them.
+fn traffic(sandbox: &SandboxInfo) -> Option<String> {
+    match (sandbox.rx_bytes, sandbox.tx_bytes) {
+        (None, None) => None,
+        (rx, tx) => Some(format!(
+            "↓ {}  ↑ {}",
+            or_dash(rx.map(format_bytes)),
+            or_dash(tx.map(format_bytes))
+        )),
+    }
+}
+
+fn network_tab(app: &App, sandbox: &SandboxInfo, height: u16) -> Vec<Line<'static>> {
+    let rows = app.network_rows();
+    let blocked = rows.iter().filter(|entry| !entry.allowed).count();
+    let mut header = vec![format!("policy {}", preset_word(app.policy)).into()];
+    if let Some(traffic) = traffic(sandbox) {
+        header.push(" · ".dim());
+        header.push(traffic.into());
+    }
+    header.push(" · ".dim());
+    header.push(format!("{blocked} blocked").into());
+    let mut lines = vec![Line::from(header), Line::default()];
+    if !sandbox.proxied {
+        lines.push(Line::from(
+            "created before network policy; recreate with".dim(),
+        ));
+        lines.push(Line::from(format!("msb rm -f {}", sandbox.name)));
+        return lines;
+    }
+    if rows.is_empty() {
+        lines.push(Line::from("No connections yet".dim()));
+        return lines;
+    }
+    let visible = usize::from(height).saturating_sub(lines.len()).max(1);
+    let start = app.network_row.saturating_sub(visible - 1);
+    for (index, entry) in rows.iter().enumerate().skip(start).take(visible) {
+        lines.push(network_row(entry, index == app.network_row));
+    }
+    lines
+}
+
+fn network_row(entry: &NetEntry, selected: bool) -> Line<'static> {
+    let (symbol, colour) = if entry.allowed {
+        ("✓", Color::Green)
+    } else {
+        ("✗", Color::Red)
+    };
+    let cursor = if selected { "▸ " } else { "  " };
+    let target = format!("{}:{}", entry.host, entry.port);
+    let mut line = Line::from(vec![
+        cursor.fg(ACCENT),
+        symbol.fg(colour),
+        " ".into(),
+        format!("{target:<32}").into(),
+        format!("{:>6}", entry.count).into(),
+        "  ".into(),
+        entry.last_seen.clone().dim(),
+    ]);
+    if selected {
+        line = line.bold();
+    }
+    line
 }
 
 fn row(label: &str, value: String) -> Line<'static> {
@@ -412,12 +511,44 @@ fn render_confirm_remove(frame: &mut Frame, name: &str) {
     render_popup(frame, "Remove sandbox", lines, 48);
 }
 
+fn render_preset(frame: &mut Frame, index: usize, then_create: bool) {
+    let mut lines = Vec::new();
+    if then_create {
+        lines.push(Line::from(
+            "Choose once for all sandboxes; change it later with p.".dim(),
+        ));
+        lines.push(Line::default());
+    }
+    for (position, preset) in Preset::ALL.iter().enumerate() {
+        let title = format!(" {:<12}", preset.title());
+        let title = if position == index {
+            title.fg(Color::Black).bg(ACCENT).bold()
+        } else {
+            title.into()
+        };
+        lines.push(Line::from(vec![title, " ".into(), preset.describe().dim()]));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        "↑↓".bold(),
+        " choose  ".dim(),
+        "↵".bold(),
+        " select  ".dim(),
+        "esc".bold(),
+        " cancel".dim(),
+    ]));
+    render_popup(frame, "Network policy", lines, 76);
+}
+
 fn render_help(frame: &mut Frame) {
-    let lines = KEYS
-        .iter()
-        .map(|(key, label)| Line::from(vec![format!("{key:8}").bold(), label.dim()]))
-        .collect();
-    render_popup(frame, "Keys", lines, 32);
+    let hint = |(key, label): &(&'static str, &'static str)| {
+        Line::from(vec![format!("{key:8}").bold(), label.dim()])
+    };
+    let mut lines: Vec<Line<'static>> = KEYS.iter().map(hint).collect();
+    lines.push(Line::default());
+    lines.push(Line::from("Network tab".bold()));
+    lines.extend(NETWORK_KEYS.iter().map(hint));
+    render_popup(frame, "Keys", lines, 34);
 }
 
 fn bar(percent: f64, width: u16) -> String {
@@ -534,6 +665,16 @@ mod tests {
         assert_eq!(shorten_home(Path::new("/srv/api"), None), "/srv/api");
     }
 
+    #[test]
+    fn traffic_needs_at_least_one_counter() {
+        let mut sandbox = info("x", Status::Running);
+        assert_eq!(traffic(&sandbox), None);
+        sandbox.rx_bytes = Some(1536);
+        assert_eq!(traffic(&sandbox).as_deref(), Some("↓ 1.5K  ↑ —"));
+        sandbox.tx_bytes = Some(0);
+        assert_eq!(traffic(&sandbox).as_deref(), Some("↓ 1.5K  ↑ 0B"));
+    }
+
     fn info(name: &str, status: Status) -> SandboxInfo {
         SandboxInfo {
             name: name.to_owned(),
@@ -547,8 +688,29 @@ mod tests {
             memory_limit_bytes: None,
             uptime: None,
             network: None,
+            proxied: false,
+            rx_bytes: None,
+            tx_bytes: None,
             secrets: Vec::new(),
             mounts: Vec::new(),
+        }
+    }
+
+    fn entry(
+        sandbox: &str,
+        host: &str,
+        port: u16,
+        allowed: bool,
+        count: u64,
+        seen: &str,
+    ) -> NetEntry {
+        NetEntry {
+            sandbox: sandbox.to_owned(),
+            host: host.to_owned(),
+            port,
+            allowed,
+            count,
+            last_seen: seen.to_owned(),
         }
     }
 
@@ -568,7 +730,10 @@ mod tests {
             memory_bytes: Some(GIB * 21 / 10),
             memory_limit_bytes: Some(GIB * 32),
             uptime: Some(Duration::from_secs(12 * 60)),
-            network: Some("public + host".to_owned()),
+            network: Some("public".to_owned()),
+            proxied: true,
+            rx_bytes: Some(48 * 1024 * 1024 + 200 * 1024),
+            tx_bytes: Some(3 * 1024 * 1024 + 100 * 1024),
             secrets: vec!["OPENAI_API_KEY".to_owned()],
             mounts: vec!["/home/dev/dev/xap/api -> same path".to_owned()],
             ..info("codex-api", Status::Running)
@@ -576,9 +741,24 @@ mod tests {
         let stopped = SandboxInfo {
             agent: Some("pi".to_owned()),
             project: Some(PathBuf::from("/home/dev/notes")),
+            proxied: true,
             ..info("pi-notes", Status::Stopped)
         };
-        app.set_sandboxes(vec![running, stopped, info("scratch", Status::Running)]);
+        let older = SandboxInfo {
+            network: Some("public + host".to_owned()),
+            ..info("scratch", Status::Running)
+        };
+        app.set_sandboxes(vec![running, stopped, older]);
+        app.set_network(
+            Some(Preset::Balanced),
+            vec![
+                entry("codex-api", "pypi.org", 443, false, 7, "12:04:51"),
+                entry("codex-api", "169.254.169.254", 80, false, 1, "12:01:10"),
+                entry("codex-api", "api.openai.com", 443, true, 42, "12:04:50"),
+                entry("codex-api", "registry.npmjs.org", 443, true, 3, "11:58:02"),
+                entry("pi-notes", "elsewhere.test", 443, false, 1, "10:00:00"),
+            ],
+        );
         app
     }
 
@@ -652,6 +832,53 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_network_tab_populated() {
+        let mut app = populated();
+        app.tab = Tab::Network;
+        app.network_row = 2;
+        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+    }
+
+    #[test]
+    fn snapshot_network_tab_empty() {
+        let mut app = populated();
+        app.tab = Tab::Network;
+        app.selected = 1;
+        app.set_network(Some(Preset::LockedDown), Vec::new());
+        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+    }
+
+    #[test]
+    fn snapshot_network_tab_older_sandbox() {
+        let mut app = populated();
+        app.tab = Tab::Network;
+        app.selected = 2;
+        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+    }
+
+    #[test]
+    fn snapshot_preset_popup() {
+        let mut app = populated();
+        app.popup = Some(Popup::Preset {
+            index: 1,
+            then_create: true,
+        });
+        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+    }
+
+    #[test]
+    fn network_tab_scrolls_to_the_cursor() {
+        let mut app = populated();
+        app.tab = Tab::Network;
+        app.network_row = 3;
+        // 8 rows of detail: title, tabs, rule, header, blank, then 3 visible rows.
+        let terminal = draw(&app, 100, 10);
+        let text = format!("{:?}", terminal.backend().buffer());
+        assert!(text.contains("registry.npmjs.org"), "{text}");
+        assert!(!text.contains("pypi.org:443"), "{text}");
+    }
+
+    #[test]
     fn snapshot_scrolls_to_selected_card() {
         let mut app = populated();
         app.selected = 3;
@@ -672,11 +899,18 @@ mod tests {
             None,
             Some(Popup::Help),
             Some(Popup::Create { agent_index: 0 }),
+            Some(Popup::Preset {
+                index: 0,
+                then_create: false,
+            }),
         ] {
-            app.popup = popup;
-            draw(&app, 60, 20);
-            draw(&app, 10, 3);
-            draw(&app, 1, 1);
+            for tab in [Tab::Overview, Tab::Logs, Tab::Network] {
+                app.tab = tab;
+                app.popup = popup.clone();
+                draw(&app, 60, 20);
+                draw(&app, 10, 3);
+                draw(&app, 1, 1);
+            }
         }
     }
 }

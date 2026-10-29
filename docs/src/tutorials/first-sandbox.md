@@ -31,10 +31,13 @@ echo "hello from the host" > note.txt
 msbx agent shell
 ```
 
-The first run creates a sandbox named `shell-msbx-tutorial`, boots it, and installs a few
-packages (`ca-certificates`, `git`, `curl`). You will see:
+The very first run asks which network policy new sandboxes get; press Enter for Balanced
+(block by default, with package registries and AI APIs allowed). Then msbx creates a sandbox
+named `shell-msbx-tutorial`, boots it, and installs a few packages (`ca-certificates`, `git`,
+`curl`). You will see:
 
 ```text
+Preset [1-3, default 2]:
 installing shell in shell-msbx-tutorial (first run only)...
 ```
 
@@ -63,7 +66,8 @@ msbx
 ```
 
 1. `shell-msbx-tutorial` is on the left with live CPU and memory. Press `Tab` to see its Logs,
-   and `Tab` again for the Overview.
+   `Tab` again for the Network tab (what the sandbox reached and what was blocked), and once
+   more for the Overview.
 2. Press `Enter` to attach. You are back in `bash` in the VM. Type `exit` and the dashboard
    returns, showing `exited shell-msbx-tutorial (code 0)`.
 3. Press `s` to stop the sandbox. Its status changes to stopped. Press `s` again to start it.

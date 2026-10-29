@@ -9,17 +9,24 @@ use microsandbox::sandbox::{
     MAX_SANDBOX_LIST_LIMIT, RootfsSource, SandboxHandle, SandboxStatus, VolumeMount,
 };
 use microsandbox::{
-    MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkPolicy, NetworkProfile, Sandbox,
+    MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkAction, NetworkPolicy, Sandbox,
     SandboxMetrics, SecretSource, Volume,
 };
 use microsandbox_types::{Action, Destination, DestinationGroup, Direction, NetworkSpec};
 
 use crate::agents::{self, Agent, Login};
 use crate::model::{SandboxInfo, Status};
-use crate::models;
+use crate::{models, proxy};
 
 const LABEL_AGENT: &str = "msbx.agent";
 const LABEL_PROJECT: &str = "msbx.project";
+/// `proxy` marks sandboxes created to use the msbx proxy, so `policy.toml` applies to them.
+const LABEL_NETWORK: &str = "msbx.network";
+const NETWORK_PROXY: &str = "proxy";
+
+/// Host ports the sandbox may reach directly (Ollama, LM Studio); fixed at create because
+/// host-bound traffic never goes through the proxy.
+const HOST_MODEL_PORTS: [u16; 2] = [11434, 1234];
 const INSTALL_MARKER: &str = "/root/.msbx-installed";
 
 /// Guest mount point of the per-agent login volume (RFC 0004).
@@ -109,6 +116,7 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         ensure_login_volume(volume, agent.id).await?;
     }
 
+    let static_policy = proxied_policy()?;
     let (secrets, missing) = agents::select_secrets(agent, |var| std::env::var(var).ok());
     for var in missing {
         eprintln!(
@@ -124,11 +132,14 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         .workdir(project_path)
         .label(LABEL_AGENT, agent.id)
         .label(LABEL_PROJECT, project_path)
-        .network(|network| {
-            network.policy(NetworkPolicy::from_profiles([
-                NetworkProfile::Public,
-                NetworkProfile::Host,
-            ]))
+        .label(LABEL_NETWORK, NETWORK_PROXY)
+        .network(|network| network.policy(static_policy))
+        // Per-host decisions happen in the msbx proxy; the token is read from the host
+        // environment at each start, like secrets, so it never lands in the database.
+        .proxy(|proxy| {
+            proxy
+                .http_connect(proxy::ADDRESS)
+                .credentials(&name, SecretSource::env(proxy::TOKEN_VAR))
         })
         .detached(true);
     if let Some(volume) = &login_volume {
@@ -156,6 +167,22 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
     // A detached sandbox's handle never owns the VM, so releasing it leaves the VM running.
     sandbox.detach().await;
     prepared.map(|()| name)
+}
+
+/// The static policy of a proxied sandbox: deny by default, DNS and the local model ports on the
+/// host, and TCP to public addresses (which msb then sends through the proxy). Private, loopback,
+/// link-local and metadata addresses match no rule, so the default denies them.
+/// Rules are first-match (microsandbox-network 0.7.11 `NetworkPolicy::evaluate_egress`).
+fn proxied_policy() -> Result<NetworkPolicy> {
+    NetworkPolicy::builder()
+        .default_egress(NetworkAction::Deny)
+        .default_ingress(NetworkAction::Allow)
+        .egress(|rule| rule.udp().tcp().port(53).allow_host())
+        .egress(|rule| rule.tcp().ports(HOST_MODEL_PORTS).allow_host())
+        .egress(|rule| rule.tcp().allow_public())
+        .build()
+        .map_err(|error| anyhow::anyhow!("{error}"))
+        .context("building the sandbox network policy")
 }
 
 /// Starts the agent's existing sandbox if needed and refreshes its login link and models, for
@@ -434,6 +461,11 @@ fn info(handle: &SandboxHandle, metrics: Option<&SandboxMetrics>) -> SandboxInfo
             .or(configured_memory),
         uptime: metrics.map(|metrics| metrics.uptime),
         network: spec.map(|spec| network_summary(&spec.network)),
+        proxied: spec.is_some_and(|spec| {
+            spec.labels.get(LABEL_NETWORK).map(String::as_str) == Some(NETWORK_PROXY)
+        }),
+        rx_bytes: metrics.map(|metrics| metrics.net_rx_bytes),
+        tx_bytes: metrics.map(|metrics| metrics.net_tx_bytes),
         secrets: spec
             .and_then(|spec| spec.network.secrets.as_ref())
             .map(|secrets| secrets.secrets.iter().map(|s| s.env_var.clone()).collect())
@@ -652,10 +684,50 @@ mod tests {
         assert_eq!(network_summary(&network), "disabled");
     }
 
-    /// Boots a real VM: `cargo test -- --ignored`. Needs msb on PATH and network access.
+    /// The msbx dirs for a VM test, from `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, which must be
+    /// set (to temporary folders) so no test touches the real `~/.config/msbx`.
+    fn test_dirs() -> Result<crate::paths::Dirs> {
+        for var in ["XDG_CONFIG_HOME", "XDG_STATE_HOME"] {
+            anyhow::ensure!(
+                std::env::var_os(var).is_some_and(|value| !value.is_empty()),
+                "set {var} to a temporary folder so the test never touches your real msbx files"
+            );
+        }
+        crate::paths::Dirs::from_env()
+    }
+
+    /// An in-process proxy on the fixed port with `policy` and the token from
+    /// `MSBX_PROXY_TOKEN` (which the SDK resolves when it boots the VM). The caller stops it with
+    /// `proxy::stop` and awaits the handle.
+    async fn test_proxy(
+        dirs: &crate::paths::Dirs,
+        policy: &crate::policy::Policy,
+    ) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        let token = std::env::var(proxy::TOKEN_VAR).context("set MSBX_PROXY_TOKEN")?;
+        crate::paths::write_private(&dirs.token_file(), format!("{token}\n").as_bytes())?;
+        crate::policy::save(&dirs.policy_file(), policy)?;
+        let listener = tokio::net::TcpListener::bind(proxy::ADDRESS)
+            .await
+            .context("binding the proxy port; stop any running msbx proxy first")?;
+        let timing = proxy::Timing {
+            reload: Duration::from_millis(200),
+            flush: Duration::from_millis(200),
+        };
+        Ok(tokio::spawn(proxy::serve_on(
+            listener,
+            dirs.clone(),
+            timing,
+        )))
+    }
+
+    /// Boots a real VM: `cargo test -- --ignored`. Needs msb on PATH, network access, and the
+    /// variables described on `proxied_sandbox_follows_the_live_policy`.
     #[tokio::test]
-    #[ignore = "boots a real microVM"]
+    #[ignore = "boots a real microVM; needs XDG_CONFIG_HOME, XDG_STATE_HOME and MSBX_PROXY_TOKEN"]
     async fn shell_sandbox_shares_the_project_folder() -> Result<()> {
+        let dirs = test_dirs()?;
+        let open = crate::policy::Policy::new(crate::policy::Preset::Open);
+        let server = test_proxy(&dirs, &open).await?;
         use_runtime(&crate::attach::msb_path()?);
         let project = std::env::temp_dir()
             .join(format!("msbx-it-{}", std::process::id()))
@@ -664,22 +736,30 @@ mod tests {
         let project = project.canonicalize()?;
         let agent = AgentId::Shell.agent();
 
-        let name = ensure(agent, &project).await?;
+        let created = ensure(agent, &project).await;
         let outcome = async {
+            let name = created?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
             let written = sandbox.shell("echo from-guest > written-in-vm.txt").await;
             sandbox.detach().await;
-            assert!(written?.status().success);
             let listed = list().await?.into_iter().find(|info| info.name == name);
+            remove(&name).await?;
+            assert!(written?.status().success);
             anyhow::Ok(listed)
         }
         .await;
-        remove(&name).await?;
+        proxy::stop(&dirs).await?;
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
 
         let listed = outcome?.context("created sandbox missing from list()")?;
         assert_eq!(listed.agent.as_deref(), Some("shell"));
         assert_eq!(listed.project.as_deref(), Some(project.as_path()));
-        assert_eq!(listed.network.as_deref(), Some("public + host"));
+        assert_eq!(
+            listed.network.as_deref(),
+            Some("public"),
+            "the port-scoped host rules are not profiles"
+        );
+        assert!(listed.proxied);
         let on_host = std::fs::read_to_string(project.join("written-in-vm.txt"))?;
         assert_eq!(on_host.trim(), "from-guest");
         std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
@@ -930,6 +1010,100 @@ mod tests {
         );
         assert!(!guest_env.contains(&value), "guest sees the real value");
         assert_eq!(guest_env.trim(), "$MSB_MSBX_TEST_SECRET");
+        Ok(())
+    }
+
+    /// An agent whose install is a no-op; the image's `node` makes the HTTPS requests.
+    static NET_AGENT: Agent = Agent {
+        id: "nettest",
+        install: "true",
+        command: "true",
+        secrets: &[],
+        login: None,
+        models_file: None,
+    };
+
+    /// `node -e` script that exits 0 when an HTTPS GET to `$1` answers, 1 otherwise.
+    const FETCH: &str = "fetch(process.argv[1], {signal: AbortSignal.timeout(15000)})\
+        .then(r => process.exit(r.ok || r.status < 500 ? 0 : 1), () => process.exit(1))";
+
+    /// Whether the guest can reach `host` over HTTPS through the proxy.
+    async fn guest_reaches(name: &str, host: &str) -> Result<bool> {
+        let sandbox = Sandbox::get(name).await?.connect().await?;
+        let output = sandbox
+            .shell(format!("node -e '{FETCH}' https://{host}/"))
+            .await;
+        sandbox.detach().await;
+        Ok(output?.status().success)
+    }
+
+    /// Boots a real VM through an in-process proxy on the fixed port and checks the live policy.
+    /// Point every msbx path at temporary folders and give the proxy a one-off token:
+    /// `XDG_CONFIG_HOME=$(mktemp -d) XDG_STATE_HOME=$(mktemp -d) MSBX_PROXY_TOKEN=$(openssl rand
+    /// -hex 16) cargo test -- --ignored proxied`. Fails if another msbx proxy holds the port.
+    #[tokio::test]
+    #[ignore = "boots a real microVM; needs XDG_CONFIG_HOME, XDG_STATE_HOME and MSBX_PROXY_TOKEN"]
+    async fn proxied_sandbox_follows_the_live_policy() -> Result<()> {
+        use crate::netlog::Log;
+        use crate::policy::{Policy, Preset, Target};
+
+        let dirs = test_dirs()?;
+        let mut policy = Policy::new(Preset::LockedDown);
+        policy.allow.push(Target::parse("example.com")?);
+        let server = test_proxy(&dirs, &policy).await?;
+
+        use_runtime(&crate::attach::msb_path()?);
+        let project = std::env::temp_dir()
+            .join(format!("msbx-net-{}", std::process::id()))
+            .join("proj");
+        std::fs::create_dir_all(&project)?;
+        let project = project.canonicalize()?;
+        let name = ensure(&NET_AGENT, &project).await?;
+        let outcome = Box::pin(async {
+            let config = Sandbox::get(&name).await?.config()?;
+            let stored = config.spec.network.policy.context("policy stored")?;
+            assert_eq!(stored.default_egress, Action::Deny);
+            assert!(config.spec.network.outbound_proxy.is_some(), "proxy stored");
+            assert_eq!(
+                config.spec.labels.get(LABEL_NETWORK).map(String::as_str),
+                Some(NETWORK_PROXY)
+            );
+
+            assert!(guest_reaches(&name, "example.com").await?, "allowed host");
+            assert!(!guest_reaches(&name, "pypi.org").await?, "blocked host");
+
+            let mut policy = policy.clone();
+            policy.allow.push(Target::parse("pypi.org")?);
+            crate::policy::save(&dirs.policy_file(), &policy)?;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(guest_reaches(&name, "pypi.org").await?, "allowed live");
+            anyhow::Ok(())
+        })
+        .await;
+        remove(&name).await?;
+        std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
+        proxy::stop(&dirs).await?;
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        outcome?;
+
+        let log = Log::load(&dirs.network_log())?;
+        let rows: Vec<(&str, &str, bool)> = log
+            .entries()
+            .iter()
+            .map(|entry| (entry.sandbox.as_str(), entry.host.as_str(), entry.allowed))
+            .collect();
+        assert!(
+            rows.contains(&(name.as_str(), "example.com", true)),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&(name.as_str(), "pypi.org", false)),
+            "{rows:?}"
+        );
+        assert!(
+            rows.contains(&(name.as_str(), "pypi.org", true)),
+            "{rows:?}"
+        );
         Ok(())
     }
 }

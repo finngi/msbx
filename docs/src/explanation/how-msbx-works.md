@@ -1,7 +1,8 @@
 # How msbx works with microsandbox
 
-msbx is a thin layer over an unmodified microsandbox, and it runs no daemon of its own. It talks
-to microsandbox in two ways:
+msbx is a thin layer over an unmodified microsandbox. Its one long-running process is the
+network proxy (`msbx proxy serve`), which sandboxes are created to use. It talks to
+microsandbox in two ways:
 
 - the microsandbox Rust SDK (pinned to 0.7.11) to list, create, start, stop and remove
   sandboxes, read their logs and metrics, and run the one-time agent install;

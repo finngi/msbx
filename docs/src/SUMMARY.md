@@ -10,6 +10,7 @@
 
 - [Run Codex or pi in a project](how-to/run-codex-or-pi.md)
 - [Reach Ollama or LM Studio on your Mac](how-to/reach-host-models.md)
+- [Control network access](how-to/control-network-access.md)
 - [Remove or reset a sandbox](how-to/remove-or-reset.md)
 
 # Reference

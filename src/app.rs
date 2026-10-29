@@ -4,19 +4,30 @@ use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::model::{SandboxInfo, Status};
+use crate::model::{NetEntry, SandboxInfo, Status};
+use crate::policy::Preset;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
     Overview,
     Logs,
+    Network,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Popup {
-    Create { agent_index: usize },
-    ConfirmRemove { name: String },
+    Create {
+        agent_index: usize,
+    },
+    ConfirmRemove {
+        name: String,
+    },
     Help,
+    /// Pick a network preset; `then_create` opens the create popup afterwards (first run).
+    Preset {
+        index: usize,
+        then_create: bool,
+    },
 }
 
 /// Side effects the event loop performs on behalf of [`App::update`].
@@ -46,6 +57,20 @@ pub(crate) enum Action {
     LoadLogs {
         name: String,
     },
+    /// Allow `target` in `policy.toml`, for one sandbox or (`None`) everywhere.
+    Allow {
+        target: String,
+        sandbox: Option<String>,
+    },
+    Deny {
+        target: String,
+        sandbox: Option<String>,
+    },
+    /// Write the preset; initialises the policy file when there is none yet.
+    SetPreset {
+        preset: Preset,
+        then_create: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -67,6 +92,12 @@ pub(crate) struct App {
     /// The sandbox name `msbx agent` would use for an agent id and project. Injected so the create
     /// popup cannot disagree with the real naming while this module stays free of the SDK.
     pub(crate) sandbox_name: fn(&str, &Path) -> String,
+    /// The global preset; `None` until `policy.toml` exists.
+    pub(crate) policy: Option<Preset>,
+    /// The proxy's connection log for every sandbox, blocked first then newest.
+    pub(crate) network: Vec<NetEntry>,
+    /// Cursor into the selected sandbox's rows of `network`.
+    pub(crate) network_row: usize,
 }
 
 impl App {
@@ -87,12 +118,26 @@ impl App {
             home,
             agents,
             sandbox_name,
+            policy: None,
+            network: Vec::new(),
+            network_row: 0,
         }
     }
 
     /// The selected sandbox, or `None` when the "+ new sandbox" card is selected.
     pub(crate) fn selected_sandbox(&self) -> Option<&SandboxInfo> {
         self.sandboxes.get(self.selected)
+    }
+
+    /// The Network tab rows of the selected sandbox.
+    pub(crate) fn network_rows(&self) -> Vec<&NetEntry> {
+        let Some(sandbox) = self.selected_sandbox() else {
+            return Vec::new();
+        };
+        self.network
+            .iter()
+            .filter(|entry| entry.sandbox == sandbox.name)
+            .collect()
     }
 
     /// Replaces the list, keeping the selection on the same sandbox name when it still exists.
@@ -122,6 +167,14 @@ impl App {
         }
     }
 
+    /// Replaces the connection log and preset, keeping the row cursor in range.
+    pub(crate) fn set_network(&mut self, policy: Option<Preset>, network: Vec<NetEntry>) {
+        self.policy = policy;
+        self.network = network;
+        let rows = self.network_rows().len();
+        self.network_row = self.network_row.min(rows.saturating_sub(1));
+    }
+
     pub(crate) fn update(&mut self, key: KeyEvent) -> Option<Action> {
         if key.kind == KeyEventKind::Release {
             return None;
@@ -144,16 +197,24 @@ impl App {
             (KeyCode::Tab, name) => {
                 self.tab = match self.tab {
                     Tab::Overview => Tab::Logs,
-                    Tab::Logs => Tab::Overview,
+                    Tab::Logs => Tab::Network,
+                    Tab::Network => Tab::Overview,
                 };
                 self.load_logs_if_needed(name)
             }
             (KeyCode::Char('c'), _) | (KeyCode::Enter, None) => {
-                self.popup = Some(Popup::Create { agent_index: 0 });
+                self.open_create();
                 None
             }
             (KeyCode::Char('?'), _) => {
                 self.popup = Some(Popup::Help);
+                None
+            }
+            (KeyCode::Char('p'), _) => {
+                self.popup = Some(Popup::Preset {
+                    index: preset_index(self.policy.unwrap_or(Preset::Balanced)),
+                    then_create: false,
+                });
                 None
             }
             (KeyCode::Enter, Some(name)) => Some(self.attach(name)),
@@ -163,8 +224,58 @@ impl App {
                 self.popup = Some(Popup::ConfirmRemove { name });
                 None
             }
+            (KeyCode::Left | KeyCode::Char('h'), Some(_)) if self.tab == Tab::Network => {
+                self.network_row = self.network_row.saturating_sub(1);
+                None
+            }
+            (KeyCode::Right | KeyCode::Char('l'), Some(_)) if self.tab == Tab::Network => {
+                let last = self.network_rows().len().saturating_sub(1);
+                self.network_row = (self.network_row + 1).min(last);
+                None
+            }
+            (KeyCode::Char('a'), Some(name)) if self.tab == Tab::Network => {
+                self.rule(|target| Action::Allow {
+                    target,
+                    sandbox: Some(name),
+                })
+            }
+            (KeyCode::Char('A'), Some(_)) if self.tab == Tab::Network => {
+                self.rule(|target| Action::Allow {
+                    target,
+                    sandbox: None,
+                })
+            }
+            (KeyCode::Char('d'), Some(name)) if self.tab == Tab::Network => {
+                self.rule(|target| Action::Deny {
+                    target,
+                    sandbox: Some(name),
+                })
+            }
             _ => None,
         }
+    }
+
+    /// The create popup, or the preset question first when the policy is not initialised.
+    fn open_create(&mut self) {
+        self.popup = Some(match self.policy {
+            Some(_) => Popup::Create { agent_index: 0 },
+            None => Popup::Preset {
+                index: preset_index(Preset::Balanced),
+                then_create: true,
+            },
+        });
+    }
+
+    /// A rule for the host under the cursor; nothing for sandboxes the proxy does not serve.
+    fn rule(&self, action: impl FnOnce(String) -> Action) -> Option<Action> {
+        if !self
+            .selected_sandbox()
+            .is_some_and(|sandbox| sandbox.proxied)
+        {
+            return None;
+        }
+        let host = self.network_rows().get(self.network_row)?.host.clone();
+        Some(action(host))
     }
 
     /// Popups are modal: they consume every key, and stay open unless the key closes them.
@@ -172,7 +283,7 @@ impl App {
         match (popup, code) {
             (Popup::Help, KeyCode::Esc | KeyCode::Char('?' | 'q'))
             | (Popup::ConfirmRemove { .. }, KeyCode::Esc | KeyCode::Char('n'))
-            | (Popup::Create { .. }, KeyCode::Esc) => None,
+            | (Popup::Create { .. } | Popup::Preset { .. }, KeyCode::Esc) => None,
             (Popup::ConfirmRemove { name }, KeyCode::Char('y')) => Some(Action::Remove { name }),
             (Popup::Create { agent_index }, KeyCode::Enter) => {
                 self.agents.get(agent_index).map(|agent| Action::Create {
@@ -193,6 +304,30 @@ impl App {
                 });
                 None
             }
+            (Popup::Preset { index, then_create }, KeyCode::Enter) => Some(Action::SetPreset {
+                preset: Preset::ALL.get(index).copied().unwrap_or(Preset::Balanced),
+                then_create,
+            }),
+            (
+                Popup::Preset { index, then_create },
+                KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k'),
+            ) => {
+                self.popup = Some(Popup::Preset {
+                    index: index.saturating_sub(1),
+                    then_create,
+                });
+                None
+            }
+            (
+                Popup::Preset { index, then_create },
+                KeyCode::Right | KeyCode::Down | KeyCode::Char('l' | 'j'),
+            ) => {
+                self.popup = Some(Popup::Preset {
+                    index: (index + 1).min(Preset::ALL.len() - 1),
+                    then_create,
+                });
+                None
+            }
             (popup, _) => {
                 self.popup = Some(popup);
                 None
@@ -207,6 +342,7 @@ impl App {
         }
         self.selected = index;
         self.logs.clear();
+        self.network_row = 0;
         let name = self.selected_sandbox().map(|sandbox| sandbox.name.clone());
         self.load_logs_if_needed(name)
     }
@@ -237,6 +373,13 @@ impl App {
     }
 }
 
+fn preset_index(preset: Preset) -> usize {
+    Preset::ALL
+        .iter()
+        .position(|candidate| *candidate == preset)
+        .unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,8 +397,22 @@ mod tests {
             memory_limit_bytes: None,
             uptime: None,
             network: None,
+            proxied: true,
+            rx_bytes: None,
+            tx_bytes: None,
             secrets: Vec::new(),
             mounts: Vec::new(),
+        }
+    }
+
+    fn entry(sandbox: &str, host: &str, allowed: bool) -> NetEntry {
+        NetEntry {
+            sandbox: sandbox.to_owned(),
+            host: host.to_owned(),
+            port: 443,
+            allowed,
+            count: 1,
+            last_seen: "12:00:00".to_owned(),
         }
     }
 
@@ -271,6 +428,14 @@ mod tests {
             sandbox("b", Status::Stopped),
             sandbox("c", Status::Crashed),
         ]);
+        app.set_network(
+            Some(Preset::Balanced),
+            vec![
+                entry("a", "pypi.org", false),
+                entry("b", "elsewhere.test", false),
+                entry("a", "api.openai.com", true),
+            ],
+        );
         app
     }
 
@@ -308,6 +473,8 @@ mod tests {
             Some(Action::LoadLogs { name: name("a") })
         );
         assert_eq!(app.tab, Tab::Logs);
+        assert_eq!(press(&mut app, KeyCode::Tab), None);
+        assert_eq!(app.tab, Tab::Network);
         assert_eq!(press(&mut app, KeyCode::Tab), None);
         assert_eq!(app.tab, Tab::Overview);
     }
@@ -361,6 +528,138 @@ mod tests {
         app.selected = 3;
         assert_eq!(press(&mut app, KeyCode::Enter), None);
         assert_eq!(app.popup, Some(Popup::Create { agent_index: 0 }));
+    }
+
+    #[test]
+    fn create_asks_for_a_preset_first_when_the_policy_is_missing() {
+        let mut app = app();
+        app.set_network(None, Vec::new());
+        assert_eq!(press(&mut app, KeyCode::Char('c')), None);
+        assert_eq!(
+            app.popup,
+            Some(Popup::Preset {
+                index: 1,
+                then_create: true
+            })
+        );
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Right);
+        assert_eq!(
+            app.popup,
+            Some(Popup::Preset {
+                index: 2,
+                then_create: true
+            }),
+            "clamps at Locked Down"
+        );
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::SetPreset {
+                preset: Preset::Balanced,
+                then_create: true
+            })
+        );
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn p_opens_the_preset_picker_on_the_current_preset() {
+        let mut app = app();
+        app.set_network(Some(Preset::LockedDown), Vec::new());
+        assert_eq!(press(&mut app, KeyCode::Char('p')), None);
+        assert_eq!(
+            app.popup,
+            Some(Popup::Preset {
+                index: 2,
+                then_create: false
+            })
+        );
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::SetPreset {
+                preset: Preset::Open,
+                then_create: false
+            })
+        );
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn network_keys_act_on_the_row_under_the_cursor() {
+        let mut app = app();
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.tab, Tab::Network);
+        let hosts: Vec<&str> = app.network_rows().iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, ["pypi.org", "api.openai.com"]);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('a')),
+            Some(Action::Allow {
+                target: name("pypi.org"),
+                sandbox: Some(name("a"))
+            })
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('A')),
+            Some(Action::Allow {
+                target: name("pypi.org"),
+                sandbox: None
+            })
+        );
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.network_row, 1, "clamps at the last row");
+        assert_eq!(
+            press(&mut app, KeyCode::Char('d')),
+            Some(Action::Deny {
+                target: name("api.openai.com"),
+                sandbox: Some(name("a"))
+            })
+        );
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.network_row, 0);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.network_row, 0, "cursor resets with the selection");
+    }
+
+    #[test]
+    fn network_keys_are_ignored_off_the_tab_and_for_older_sandboxes() {
+        let mut app = app();
+        assert_eq!(press(&mut app, KeyCode::Char('a')), None, "overview tab");
+        assert_eq!(press(&mut app, KeyCode::Left), None);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        let mut older = sandbox("a", Status::Running);
+        older.proxied = false;
+        app.set_sandboxes(vec![older]);
+        assert_eq!(press(&mut app, KeyCode::Char('a')), None, "not proxied");
+        assert_eq!(press(&mut app, KeyCode::Char('d')), None);
+        app.set_sandboxes(vec![sandbox("empty", Status::Running)]);
+        assert_eq!(press(&mut app, KeyCode::Char('A')), None, "no rows");
+        app.selected = 1;
+        assert_eq!(press(&mut app, KeyCode::Char('a')), None, "new card");
+    }
+
+    #[test]
+    fn set_network_clamps_the_cursor() {
+        let mut app = app();
+        app.tab = Tab::Network;
+        app.network_row = 1;
+        app.set_network(Some(Preset::Open), vec![entry("a", "only.test", false)]);
+        assert_eq!(app.network_row, 0);
+        assert_eq!(app.policy, Some(Preset::Open));
+        app.set_network(Some(Preset::Open), Vec::new());
+        assert_eq!(app.network_row, 0);
     }
 
     #[test]
