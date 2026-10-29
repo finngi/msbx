@@ -1,7 +1,12 @@
 # RFC 0004: Shared agent logins
 
-- Status: Proposed
+- Status: Implemented (agent scope)
 - Tracking issue: [#9](https://github.com/finngi/msbx/issues/9)
+
+The `agent` scope is implemented. The `project` and `off` scopes wait for the config file from
+[RFC 0002](0002-config.md), since the scope is a setting. Checked for the pinned versions: Codex
+0.148.0 rewrites `auth.json` in place (`OpenOptions` with `truncate` and `write`, no rename), and
+pi 1.4.0 writes it in place under a lock file beside it, so the link survives both.
 
 ## Summary
 

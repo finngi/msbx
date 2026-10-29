@@ -10,16 +10,29 @@ use microsandbox::sandbox::{
 };
 use microsandbox::{
     MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkPolicy, NetworkProfile, Sandbox,
-    SandboxMetrics, SecretSource,
+    SandboxMetrics, SecretSource, Volume,
 };
 use microsandbox_types::{Action, Destination, DestinationGroup, Direction, NetworkSpec};
 
-use crate::agents::{self, Agent};
+use crate::agents::{self, Agent, Login};
 use crate::model::{SandboxInfo, Status};
+use crate::models;
 
 const LABEL_AGENT: &str = "msbx.agent";
 const LABEL_PROJECT: &str = "msbx.project";
 const INSTALL_MARKER: &str = "/root/.msbx-installed";
+
+/// Guest mount point of the per-agent login volume (RFC 0004).
+const LOGIN_MOUNT: &str = "/root/.msbx-login";
+
+/// Login volumes are `msbx-login-<agent>`.
+const LOGIN_VOLUME_PREFIX: &str = "msbx-login-";
+
+/// Quota of a login volume. Fixed once a volume exists: the SDK rejects a different value.
+const LOGIN_QUOTA_MIB: u32 = 16;
+
+/// Exit code of the login script when the sandbox predates the login volume.
+const LOGIN_NOT_MOUNTED: i32 = 3;
 
 /// Guest memory size. This is a ceiling, not a reservation: the host only backs pages the guest
 /// actually touches, so an idle sandbox costs far less than this.
@@ -91,10 +104,17 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         .to_str()
         .with_context(|| format!("project path {} is not valid UTF-8", project.display()))?;
     check_existing(&name, project_path).await?;
+    let login_volume = login_volume(agent);
+    if let Some(volume) = &login_volume {
+        ensure_login_volume(volume, agent.id).await?;
+    }
 
     let (secrets, missing) = agents::select_secrets(agent, |var| std::env::var(var).ok());
     for var in missing {
-        eprintln!("note: {var} is not set on the host; not forwarding it to {name}");
+        eprintln!(
+            "note: {var} is not set on the host; not forwarding it to {name} \
+             (export it, or store it with `msbx secret set {var}`)"
+        );
     }
     let mut builder = Sandbox::builder(&name)
         .image(agents::IMAGE)
@@ -111,6 +131,12 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
             ]))
         })
         .detached(true);
+    if let Some(volume) = &login_volume {
+        // Files on the volume can be read and replaced, never run (RFC 0004 "Security").
+        builder = builder.volume(LOGIN_MOUNT, |mount| {
+            mount.named(volume.as_str()).noexec().nosuid().nodev()
+        });
+    }
     for secret in secrets {
         // Store only a reference: the SDK reads the host variable each time it boots the VM, so
         // the key never lands in microsandbox's database (unlike `secret_env`, which stores it).
@@ -126,10 +152,171 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         .await
         .with_context(|| format!("starting sandbox {name}"))?;
 
-    let installed = install_once(&sandbox, agent, &name).await;
+    let prepared = prepare(&sandbox, agent, &name).await;
     // A detached sandbox's handle never owns the VM, so releasing it leaves the VM running.
     sandbox.detach().await;
-    installed.map(|()| name)
+    prepared.map(|()| name)
+}
+
+/// Starts the agent's existing sandbox if needed and refreshes its login link and models, for
+/// the TUI's attach, which skips `ensure`.
+pub(crate) async fn prepare_existing(name: &str, agent: &Agent) -> Result<()> {
+    ensure_login_volume_for(name).await?;
+    let sandbox = get(name)
+        .await?
+        .connect_or_start_detached()
+        .await
+        .with_context(|| format!("connecting to sandbox {name}"))?;
+    let prepared = prepare(&sandbox, agent, name).await;
+    sandbox.detach().await;
+    prepared
+}
+
+async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+    install_once(sandbox, agent, name).await?;
+    link_login(sandbox, agent, name).await?;
+    write_models(sandbox, agent, name).await
+}
+
+/// The named volume holding the agent's sign-in, shared by all its sandboxes; `None` for
+/// agents without a login file.
+pub(crate) fn login_volume(agent: &Agent) -> Option<String> {
+    agent
+        .login
+        .as_ref()
+        .map(|_| format!("{LOGIN_VOLUME_PREFIX}{}", agent.id))
+}
+
+/// Creates the login volume unless it exists. Another msbx creating it at the same time is
+/// fine: the volume is the same either way.
+async fn ensure_login_volume(volume: &str, agent_id: &str) -> Result<()> {
+    match Volume::get(volume).await {
+        Ok(_) => return Ok(()),
+        Err(MicrosandboxError::VolumeNotFound(_)) => {}
+        Err(error) => return Err(error).with_context(|| format!("looking up volume {volume}")),
+    }
+    let created = Volume::builder(volume)
+        .quota(LOGIN_QUOTA_MIB)
+        .label(LABEL_AGENT, agent_id)
+        .create()
+        .await;
+    match created {
+        Ok(_) | Err(MicrosandboxError::VolumeAlreadyExists(_)) => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("creating volume {volume}")),
+    }
+}
+
+/// The SDK checks every named volume when a sandbox starts, so a login volume removed to sign
+/// out everywhere must exist again (empty) before the sandbox can start.
+async fn ensure_login_volume_for(name: &str) -> Result<()> {
+    let config = get(name)
+        .await?
+        .config()
+        .with_context(|| format!("reading config of sandbox {name}"))?;
+    // The mount list, not the agent table, says which volume the sandbox needs.
+    for mount in &config.spec.mounts {
+        if let VolumeMount::Named { name: volume, .. } = mount
+            && let Some(agent_id) = volume.strip_prefix(LOGIN_VOLUME_PREFIX)
+        {
+            ensure_login_volume(volume, agent_id).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Links the agent's credential file to the login volume, keeping a sign-in the agent made
+/// since the last start. Sandboxes created before the volume existed get a note instead.
+async fn link_login(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+    let Some(login) = &agent.login else {
+        return Ok(());
+    };
+    let output = sandbox
+        .shell(login_script(login))
+        .await
+        .with_context(|| format!("linking the {} login in {name}", agent.id))?;
+    match output.status().code {
+        0 => Ok(()),
+        LOGIN_NOT_MOUNTED => {
+            eprintln!(
+                "note: {name} was created without a login volume, so its {} sign-in is not \
+                 shared; recreate it with `msb rm -f {name}`",
+                agent.id
+            );
+            Ok(())
+        }
+        code => bail!(
+            "linking the {} login in {name} failed with exit code {code}:\n{}",
+            agent.id,
+            String::from_utf8_lossy(output.stderr_bytes()).trim()
+        ),
+    }
+}
+
+/// Makes `$1/$2` a link to `$3/$2` on the login volume. Paths arrive as arguments, never as
+/// shell syntax, and the script runs unchanged on the host in tests.
+const LINK_LOGIN: &str = r#"set -eu
+umask 077
+guest="$1/$2"
+shared="$3/$2"
+mkdir -p "$1"
+# A sandbox could plant a link on the volume to redirect every other sandbox's writes.
+if [ -L "$shared" ]; then rm -f "$shared"; fi
+if [ -e "$shared" ] && [ ! -f "$shared" ]; then exit 1; fi
+# The agent replaced the link with a plain file (a fresh sign-in): the newest wins.
+if [ -f "$guest" ] && [ ! -L "$guest" ]; then mv -f "$guest" "$shared"; fi
+if [ -e "$guest" ] && [ ! -L "$guest" ]; then exit 1; fi
+ln -sfn "$shared" "$guest"
+if [ -f "$shared" ]; then chmod 600 "$shared"; fi
+"#;
+
+/// Guest shell script that links the agent's credential file to the login volume.
+fn login_script(login: &Login) -> String {
+    // Login paths come from the static agent table, never from user input.
+    format!(
+        "grep -q ' {LOGIN_MOUNT} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
+         set -- '{}' '{}' '{LOGIN_MOUNT}'\n{LINK_LOGIN}",
+        login.dir, login.file
+    )
+}
+
+/// Writes pi's `models.json` for the host's local model servers, or says why there is none.
+async fn write_models(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+    let Some(guest_path) = agent.models_file else {
+        return Ok(());
+    };
+    // File reads and socket probes block, so keep them off the runtime threads.
+    let json = tokio::task::spawn_blocking(models::guest_models_json)
+        .await
+        .context("looking for local model servers")??;
+    let Some(json) = json else {
+        eprintln!(
+            "note: no local model server found on the host (Ollama on 11434, LM Studio on \
+             1234), so {} in {name} has no models configured",
+            agent.id
+        );
+        return Ok(());
+    };
+    let output = sandbox
+        .shell_with(models_script(guest_path), |options| {
+            options.stdin_bytes(json)
+        })
+        .await
+        .with_context(|| format!("writing {guest_path} in {name}"))?;
+    if !output.status().success {
+        bail!(
+            "writing {guest_path} in {name} failed with exit code {}:\n{}",
+            output.status().code,
+            String::from_utf8_lossy(output.stderr_bytes()).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Guest shell script that stores stdin at `guest_path` with mode 600. The JSON arrives on
+/// stdin, so it never passes through shell quoting.
+fn models_script(guest_path: &str) -> String {
+    let dir = guest_path.rsplit_once('/').map_or("/", |(dir, _)| dir);
+    format!("set -e\numask 077\nmkdir -p '{dir}'\ncat > '{guest_path}'\nchmod 600 '{guest_path}'\n")
 }
 
 /// Two folders with the same name map to the same sandbox; refuse to hand one project's
@@ -319,6 +506,7 @@ fn network_summary(network: &NetworkSpec) -> String {
 }
 
 pub(crate) async fn start(name: &str) -> Result<()> {
+    ensure_login_volume_for(name).await?;
     let sandbox = Sandbox::start_detached(name)
         .await
         .with_context(|| format!("starting sandbox {name}"))?;
@@ -506,7 +694,194 @@ mod tests {
             env_var: "MSBX_TEST_SECRET",
             host: "example.com",
         }],
+        login: None,
+        models_file: None,
     };
+
+    static LOGIN_AGENT: Agent = Agent {
+        id: "logintest",
+        install: "true",
+        command: "true",
+        secrets: &[],
+        login: Some(Login {
+            dir: "/root/.logintest",
+            file: "auth.json",
+        }),
+        models_file: Some("/root/.logintest/models.json"),
+    };
+
+    #[test]
+    fn login_volume_is_named_after_the_agent() {
+        assert_eq!(
+            login_volume(AgentId::Codex.agent()).as_deref(),
+            Some("msbx-login-codex")
+        );
+        assert_eq!(
+            login_volume(AgentId::Pi.agent()).as_deref(),
+            Some("msbx-login-pi")
+        );
+        assert_eq!(login_volume(AgentId::Shell.agent()), None);
+    }
+
+    #[cfg(unix)]
+    fn run_link_script(root: &Path) -> Result<()> {
+        let output = std::process::Command::new("sh")
+            .args(["-c", LINK_LOGIN, "msbx-login"])
+            .arg(root.join("guest"))
+            .arg("auth.json")
+            .arg(root.join("volume"))
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "link script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    /// Runs the guest link script on the host against a temporary "guest" and "volume".
+    #[cfg(unix)]
+    #[test]
+    fn login_script_migrates_repairs_and_ignores_planted_links() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!("msbx-login-script-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let outcome = (|| -> Result<()> {
+            std::fs::create_dir(root.join("volume"))?;
+            run_link_script(&root)?;
+            let guest = root.join("guest/auth.json");
+            let shared = root.join("volume/auth.json");
+            assert_eq!(std::fs::read_link(&guest)?, shared);
+            assert!(!shared.exists(), "no empty auth file is seeded");
+
+            // A write through the link lands on the volume.
+            std::fs::write(&guest, "first login")?;
+            run_link_script(&root)?;
+            assert_eq!(std::fs::read_to_string(&shared)?, "first login");
+            assert_eq!(
+                std::fs::metadata(&shared)?.permissions().mode() & 0o777,
+                0o600
+            );
+
+            // A fresh sign-in that replaced the link moves onto the volume.
+            std::fs::remove_file(&guest)?;
+            std::fs::write(&guest, "new login")?;
+            run_link_script(&root)?;
+            assert_eq!(std::fs::read_to_string(&shared)?, "new login");
+            assert!(std::fs::symlink_metadata(&guest)?.file_type().is_symlink());
+
+            // A link planted on the volume is removed, so its target is never written.
+            std::fs::write(root.join("victim"), "unchanged")?;
+            std::fs::remove_file(&shared)?;
+            symlink(root.join("victim"), &shared)?;
+            std::fs::remove_file(&guest)?;
+            std::fs::write(&guest, "safe login")?;
+            run_link_script(&root)?;
+            assert_eq!(std::fs::read_to_string(root.join("victim"))?, "unchanged");
+            assert!(!std::fs::symlink_metadata(&shared)?.file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(&shared)?, "safe login");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        outcome
+    }
+
+    #[test]
+    fn login_script_checks_the_mount_and_passes_paths_as_arguments() {
+        let script = login_script(&Login {
+            dir: "/root/.codex",
+            file: "auth.json",
+        });
+        assert!(
+            script.starts_with("grep -q ' /root/.msbx-login ' /proc/mounts || exit 3\n"),
+            "{script}"
+        );
+        assert!(
+            script.contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login'\n"),
+            "{script}"
+        );
+        assert!(script.ends_with(LINK_LOGIN), "{script}");
+    }
+
+    #[test]
+    fn models_script_writes_stdin_with_mode_600() {
+        assert_eq!(
+            models_script("/root/.pi/agent/models.json"),
+            "set -e\numask 077\nmkdir -p '/root/.pi/agent'\ncat > '/root/.pi/agent/models.json'\n\
+             chmod 600 '/root/.pi/agent/models.json'\n"
+        );
+    }
+
+    /// Boots a real VM: `cargo test -- --ignored`. Checks the login link, that a fresh sign-in
+    /// moves into the volume, that `start` recreates a removed volume, and pi's models.json.
+    #[tokio::test]
+    #[ignore = "boots a real microVM"]
+    async fn login_file_is_linked_into_the_shared_volume() -> Result<()> {
+        use_runtime(&crate::attach::msb_path()?);
+        let project = std::env::temp_dir()
+            .join(format!("msbx-login-{}", std::process::id()))
+            .join("proj");
+        std::fs::create_dir_all(&project)?;
+        let project = project.canonicalize()?;
+        let volume = login_volume(&LOGIN_AGENT).context("login agent has a volume")?;
+        let host_models = models::guest_models_json()?;
+
+        let name = ensure(&LOGIN_AGENT, &project).await?;
+        // Boxed: the many awaits make this future too large for clippy's stack budget.
+        let outcome = Box::pin(async {
+            let sandbox = Sandbox::get(&name).await?.connect().await?;
+            let first = sandbox
+                .shell(
+                    "set -e\n\
+                     test \"$(readlink /root/.logintest/auth.json)\" = /root/.msbx-login/auth.json\n\
+                     echo '{\"first\":1}' > /root/.logintest/auth.json\n\
+                     test -f /root/.msbx-login/auth.json\n\
+                     rm /root/.logintest/auth.json\n\
+                     echo '{\"second\":2}' > /root/.logintest/auth.json\n\
+                     cat /root/.logintest/models.json 2>/dev/null || true",
+                )
+                .await;
+            sandbox.detach().await;
+            let first = first?;
+            anyhow::ensure!(first.status().success, "{}", first.stderr()?);
+            let guest_models = first.stdout()?;
+            match &host_models {
+                Some(json) => assert_eq!(guest_models.trim(), json.trim()),
+                None => assert!(guest_models.trim().is_empty(), "{guest_models}"),
+            }
+
+            // The second ensure moves the fresh sign-in into the volume and restores the link.
+            ensure(&LOGIN_AGENT, &project).await?;
+            let sandbox = Sandbox::get(&name).await?.connect().await?;
+            let second = sandbox
+                .shell(
+                    "test -L /root/.logintest/auth.json && \
+                     stat -c %a /root/.msbx-login/auth.json && cat /root/.msbx-login/auth.json",
+                )
+                .await;
+            sandbox.detach().await;
+            let second = second?;
+            anyhow::ensure!(second.status().success, "{}", second.stderr()?);
+            assert_eq!(second.stdout()?.trim(), "600\n{\"second\":2}");
+            let on_host = microsandbox::config::config()?
+                .volumes_dir()
+                .join(&volume)
+                .join("auth.json");
+            assert_eq!(std::fs::read_to_string(on_host)?.trim(), "{\"second\":2}");
+
+            // Signing out everywhere removes the volume; `start` must bring an empty one back.
+            stop(&name).await?;
+            Volume::remove(&volume).await?;
+            start(&name).await?;
+            assert!(Volume::get(&volume).await.is_ok(), "start recreated the volume");
+            anyhow::Ok(())
+        })
+        .await;
+        remove(&name).await?;
+        Volume::remove(&volume).await?;
+        std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
+        outcome
+    }
 
     /// Boots a real VM and proves the secret value is never persisted. Run with a value unique
     /// to this run, since SQLite free pages can keep bytes from earlier (deleted) rows:

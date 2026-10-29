@@ -24,6 +24,34 @@ and [security policy](https://github.com/superradcompany/microsandbox/blob/main/
 - Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox
   configuration (readable only by your user account).
 
+## Keychain keys
+
+`msbx secret set` stores an API key in the macOS Keychain through Apple's `security` tool,
+which prompts for the value; msbx never reads it on that path. At startup msbx reads each
+unset secret with `security find-generic-password` and runs itself again with the value in its
+environment, where microsandbox's secret proxy picks it up. The value is not printed, logged,
+put in an error message or passed on a command line. The first time, macOS may ask whether
+`security` may read the item.
+
+## Shared sign-ins
+
+Codex and pi sign-ins (the `auth.json` each writes) are kept on one named volume per agent,
+`msbx-login-<agent>`, and linked into every sandbox of that agent. See
+[RFC 0004](../rfcs/0004-shared-logins.md) for the design and its risk table. In short:
+
+- Any sandbox of that agent can read the token, and could swap in another account's token.
+  Use separate agents or remove the volume for repos you do not trust.
+- The volume is mounted `noexec`, `nosuid` and `nodev`, and msbx removes a link planted on it
+  before linking.
+- The token is plain JSON under `~/.microsandbox/volumes/msbx-login-<agent>/` on the host,
+  readable only by your user account.
+- Only the sign-in file is shared. Config, sessions and history stay in each sandbox.
+
+## Local models for pi
+
+msbx copies only loopback providers from your pi `models.json` into the VM, so a cloud API key
+in that file stays on the host. The copied file is written with mode 600.
+
 ## Known issue: git hooks can run VM-written code on the host
 
 > **Warning.** This is a known, unfixed gap. It is tracked in the

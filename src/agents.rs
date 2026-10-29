@@ -13,6 +13,14 @@ pub(crate) struct Secret {
     pub(crate) host: &'static str,
 }
 
+/// Where an agent keeps its sign-in inside the VM. msbx links that file into the shared login
+/// volume so one sign-in serves every sandbox of the agent (RFC 0004).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Login {
+    pub(crate) dir: &'static str,
+    pub(crate) file: &'static str,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Agent {
     /// Stable identifier used in sandbox names, labels and the CLI.
@@ -21,6 +29,9 @@ pub(crate) struct Agent {
     pub(crate) install: &'static str,
     pub(crate) command: &'static str,
     pub(crate) secrets: &'static [Secret],
+    pub(crate) login: Option<Login>,
+    /// Guest path of a pi-format `models.json` listing the host's local model servers.
+    pub(crate) models_file: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -54,6 +65,12 @@ static CODEX: Agent = Agent {
         env_var: "OPENAI_API_KEY",
         host: "api.openai.com",
     }],
+    // Codex 0.148.0 rewrites auth.json in place (truncate + write), so a link survives refreshes.
+    login: Some(Login {
+        dir: "/root/.codex",
+        file: "auth.json",
+    }),
+    models_file: None,
 };
 
 static PI: Agent = Agent {
@@ -63,6 +80,12 @@ static PI: Agent = Agent {
     command: "pi",
     // Pi talks to local models on the host, so there is nothing to forward.
     secrets: &[],
+    // pi 1.4.0 writes auth.json in place under a lock file beside it, so a link survives.
+    login: Some(Login {
+        dir: "/root/.pi/agent",
+        file: "auth.json",
+    }),
+    models_file: Some("/root/.pi/agent/models.json"),
 };
 
 static SHELL: Agent = Agent {
@@ -70,7 +93,22 @@ static SHELL: Agent = Agent {
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl",
     command: "bash",
     secrets: &[],
+    login: None,
+    models_file: None,
 };
+
+/// Every env var any agent forwards as a secret, in table order without repeats.
+pub(crate) fn secret_vars() -> Vec<&'static str> {
+    let mut vars = Vec::new();
+    for agent in AgentId::value_variants().iter().map(|id| id.agent()) {
+        for secret in agent.secrets {
+            if !vars.contains(&secret.env_var) {
+                vars.push(secret.env_var);
+            }
+        }
+    }
+    vars
+}
 
 /// Splits an agent's secrets into those set on the host and the names of those that are not.
 /// Only presence is checked: the value itself is read by the SDK from the host environment each
@@ -127,6 +165,11 @@ mod tests {
         assert_eq!(find("shell"), Some(&SHELL));
         assert_eq!(find("Codex"), None, "labels are written lowercase");
         assert_eq!(find("claude"), None);
+    }
+
+    #[test]
+    fn secret_vars_lists_each_var_once() {
+        assert_eq!(secret_vars(), ["OPENAI_API_KEY"]);
     }
 
     #[test]

@@ -2,11 +2,21 @@
 
 ## Codex
 
-1. Set your OpenAI key on the host before the sandbox is first created:
+1. Set your OpenAI key on the host before the sandbox is first created. Either export it:
 
    ```sh
    export OPENAI_API_KEY=sk-...
    ```
+
+   or, on macOS, store it in the Keychain once:
+
+   ```sh
+   msbx secret set OPENAI_API_KEY
+   ```
+
+   `security` prompts for the value; msbx never reads it. Later runs of `msbx` take the key
+   from the Keychain whenever the variable is not set in the shell. `msbx secret rm
+   OPENAI_API_KEY` removes it.
 
 2. From the project folder, start Codex:
 
@@ -21,9 +31,21 @@ only on requests to `api.openai.com`. The key is read from your host environment
 sandbox starts, so keep `OPENAI_API_KEY` exported in the shell you run msbx from.
 
 If the key was not set when the sandbox was created, msbx prints
-`note: OPENAI_API_KEY is not set on the host; not forwarding it to codex-<folder>` and the
-sandbox has no key. Secrets are part of the sandbox settings, so
-[remove the sandbox](remove-or-reset.md) and run `msbx agent codex` again with the key set.
+`note: OPENAI_API_KEY is not set on the host; not forwarding it to codex-<folder> (export it,
+or store it with `msbx secret set OPENAI_API_KEY`)` and the sandbox has no key. Secrets are
+part of the sandbox settings, so [remove the sandbox](remove-or-reset.md) and run
+`msbx agent codex` again with the key set.
+
+### Sign in with ChatGPT instead
+
+1. Turn on device code sign-in in your ChatGPT security settings.
+2. Run `msbx agent codex -- login --device-auth` and enter the code it shows.
+3. Run `msbx agent codex` in any project. It starts signed in.
+
+The sign-in file, `/root/.codex/auth.json` in the VM, is a link to the `msbx-login-codex`
+volume, which every Codex sandbox mounts at `/root/.msbx-login`. A token refresh in one sandbox
+is seen by all of them, and the login survives `msb rm`. To sign out everywhere, stop the Codex
+sandboxes and run `msbx volume rm msbx-login-codex`.
 
 ## pi
 
@@ -31,8 +53,12 @@ sandbox has no key. Secrets are part of the sandbox settings, so
 msbx agent pi
 ```
 
-pi uses models served on your host, so it needs no API key. See
+pi uses models served on your host, so it needs no API key. msbx writes the list of local
+model servers into the sandbox each time; see
 [Reach Ollama or LM Studio on your Mac](reach-host-models.md).
+
+To use a subscription instead, type `/login` in pi. The login is kept on the `msbx-login-pi`
+volume and shared by every pi sandbox, like Codex's.
 
 ## Another project folder
 

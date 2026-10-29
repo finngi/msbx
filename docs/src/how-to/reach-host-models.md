@@ -4,6 +4,21 @@ msbx sandboxes can reach services on the host at `host.microsandbox.internal`. m
 routes that name to your host's `localhost`, so a model server listening only on `127.0.0.1`
 is reachable.
 
+## pi: no setup needed
+
+Each time `msbx agent pi` starts, msbx writes `/root/.pi/agent/models.json` in the VM:
+
+1. If you have `~/.pi/agent/models.json` on the host (or `$PI_CODING_AGENT_DIR/models.json`),
+   msbx copies the providers whose `baseUrl` host is `127.0.0.1`, `localhost`, `[::1]` or
+   `0.0.0.0`, with that host replaced by `host.microsandbox.internal`. Every other provider is
+   left out, so a cloud API key in that file never enters the VM.
+2. Otherwise msbx asks `127.0.0.1:11434` (Ollama) and `127.0.0.1:1234` (LM Studio) for their
+   models and writes a provider for each server that answers.
+3. If neither finds a server, msbx writes nothing and prints a `note:`.
+
+pi reads the file when you open `/model`. Start the model server before `msbx agent pi`, or
+run `msbx agent pi` again after starting it.
+
 ## Ollama
 
 1. On the host, start Ollama (the app, or `ollama serve`). It listens on port 11434.
