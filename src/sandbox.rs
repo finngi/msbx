@@ -10,7 +10,7 @@ use microsandbox::sandbox::{
 };
 use microsandbox::{
     MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkPolicy, NetworkProfile, Sandbox,
-    SandboxMetrics,
+    SandboxMetrics, SecretSource,
 };
 use microsandbox_types::{Action, Destination, DestinationGroup, Direction, NetworkSpec};
 
@@ -112,7 +112,14 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         })
         .detached(true);
     for secret in secrets {
-        builder = builder.secret_env(secret.env_var, secret.value, secret.host);
+        // Store only a reference: the SDK reads the host variable each time it boots the VM, so
+        // the key never lands in microsandbox's database (unlike `secret_env`, which stores it).
+        builder = builder.secret(|entry| {
+            entry
+                .env(secret.env_var)
+                .source(SecretSource::env(secret.env_var))
+                .allow(secret.host)
+        });
     }
     let sandbox = builder
         .connect_or_create()
@@ -508,6 +515,67 @@ mod tests {
         let on_host = std::fs::read_to_string(project.join("written-in-vm.txt"))?;
         assert_eq!(on_host.trim(), "from-guest");
         std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
+        Ok(())
+    }
+
+    static SECRET_AGENT: Agent = Agent {
+        id: "secret",
+        name: "Secret test",
+        install: "true",
+        command: "true",
+        secrets: &[agents::Secret {
+            env_var: "MSBX_TEST_SECRET",
+            host: "example.com",
+        }],
+    };
+
+    /// Boots a real VM and proves the secret value is never persisted. Run with a value unique
+    /// to this run, since SQLite free pages can keep bytes from earlier (deleted) rows:
+    /// `MSBX_TEST_SECRET=msbx-test-secret-$RANDOM$RANDOM cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "boots a real microVM; needs MSBX_TEST_SECRET set"]
+    async fn secret_values_are_not_stored() -> Result<()> {
+        let value = std::env::var("MSBX_TEST_SECRET")
+            .context("set MSBX_TEST_SECRET to a unique dummy value to run this test")?;
+        use_runtime(&crate::attach::msb_path()?);
+        let project = std::env::temp_dir()
+            .join(format!("msbx-secret-{}", std::process::id()))
+            .join("proj");
+        std::fs::create_dir_all(&project)?;
+        let project = project.canonicalize()?;
+
+        let name = ensure(&SECRET_AGENT, &project).await?;
+        let outcome = async {
+            let handle = Sandbox::get(&name).await?;
+            let stored = format!(
+                "{}{}",
+                handle.config_json(),
+                handle.active_config_json().unwrap_or_default()
+            );
+            let sandbox = handle.connect().await?;
+            let guest = sandbox.shell("printenv MSBX_TEST_SECRET").await;
+            sandbox.detach().await;
+            let database = std::fs::read_dir(microsandbox::config::config()?.home().join("db"))?
+                .map(|entry| std::fs::read(entry?.path()))
+                .collect::<std::io::Result<Vec<_>>>()?
+                .concat();
+            anyhow::Ok((stored, guest?.stdout()?, database))
+        }
+        .await;
+        remove(&name).await?;
+        std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
+
+        let (stored, guest_env, database) = outcome?;
+        assert!(stored.contains("MSBX_TEST_SECRET"), "secret entry missing");
+        assert!(!stored.contains(&value), "stored config leaks the value");
+        assert!(
+            !database
+                .windows(value.len())
+                .any(|window| window == value.as_bytes()),
+            "microsandbox database files contain the value"
+        );
+        assert!(!guest_env.contains(&value), "guest sees the real value");
+        assert_eq!(guest_env.trim(), "$MSB_MSBX_TEST_SECRET");
         Ok(())
     }
 }

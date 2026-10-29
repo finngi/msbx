@@ -73,33 +73,23 @@ static SHELL: Agent = Agent {
     secrets: &[],
 };
 
-/// A secret resolved from the host environment, ready to hand to the sandbox builder.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedSecret {
-    pub(crate) env_var: &'static str,
-    pub(crate) value: String,
-    pub(crate) host: &'static str,
-}
-
 /// Splits an agent's secrets into those set on the host and the names of those that are not.
-/// An empty value counts as unset: forwarding it would only produce a confusing auth failure.
+/// Only presence is checked: the value itself is read by the SDK from the host environment each
+/// time the sandbox starts. An empty value counts as unset because the SDK rejects it at start.
 pub(crate) fn select_secrets(
     agent: &Agent,
     lookup: impl Fn(&str) -> Option<String>,
-) -> (Vec<ResolvedSecret>, Vec<&'static str>) {
-    let mut found = Vec::new();
+) -> (Vec<&'static Secret>, Vec<&'static str>) {
+    let mut present = Vec::new();
     let mut missing = Vec::new();
     for secret in agent.secrets {
-        match lookup(secret.env_var).filter(|value| !value.is_empty()) {
-            Some(value) => found.push(ResolvedSecret {
-                env_var: secret.env_var,
-                value,
-                host: secret.host,
-            }),
-            None => missing.push(secret.env_var),
+        if lookup(secret.env_var).is_some_and(|value| !value.is_empty()) {
+            present.push(secret);
+        } else {
+            missing.push(secret.env_var);
         }
     }
-    (found, missing)
+    (present, missing)
 }
 
 #[cfg(test)]
@@ -135,14 +125,13 @@ mod tests {
 
     #[test]
     fn select_secrets_forwards_set_vars() {
-        let (found, missing) = select_secrets(&CODEX, |var| {
+        let (present, missing) = select_secrets(&CODEX, |var| {
             (var == "OPENAI_API_KEY").then(|| "sk-test".to_owned())
         });
         assert_eq!(
-            found,
-            [ResolvedSecret {
+            present,
+            [&Secret {
                 env_var: "OPENAI_API_KEY",
-                value: "sk-test".to_owned(),
                 host: "api.openai.com",
             }]
         );
@@ -151,19 +140,19 @@ mod tests {
 
     #[test]
     fn select_secrets_reports_unset_and_empty_vars() {
-        let (found, missing) = select_secrets(&CODEX, |_| None);
-        assert_eq!(found, []);
+        let (present, missing) = select_secrets(&CODEX, |_| None);
+        assert_eq!(present, [] as [&Secret; 0]);
         assert_eq!(missing, ["OPENAI_API_KEY"]);
 
-        let (found, missing) = select_secrets(&CODEX, |_| Some(String::new()));
-        assert_eq!(found, []);
+        let (present, missing) = select_secrets(&CODEX, |_| Some(String::new()));
+        assert_eq!(present, [] as [&Secret; 0]);
         assert_eq!(missing, ["OPENAI_API_KEY"]);
     }
 
     #[test]
     fn agents_without_secrets_select_nothing() {
-        let (found, missing) = select_secrets(&PI, |_| Some("unused".to_owned()));
-        assert_eq!(found, []);
+        let (present, missing) = select_secrets(&PI, |_| Some("unused".to_owned()));
+        assert_eq!(present, [] as [&Secret; 0]);
         assert_eq!(missing, [] as [&str; 0]);
     }
 }
