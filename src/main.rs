@@ -2,7 +2,9 @@ mod agents;
 mod app;
 mod attach;
 mod model;
+mod models;
 mod sandbox;
+mod secrets;
 mod tui;
 mod ui;
 
@@ -11,6 +13,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::PossibleValuesParser;
 use clap::{Parser, Subcommand};
 
 use crate::agents::AgentId;
@@ -38,9 +41,31 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Keep an agent API key in the macOS Keychain, so it need not be exported in every shell.
+    #[command(subcommand)]
+    Secret(SecretAction),
     /// Any command msbx does not define is msb's, so it is forwarded untouched.
     #[command(external_subcommand)]
     External(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum SecretAction {
+    /// Store VAR in the Keychain; `security` prompts for the value, msbx never sees it.
+    Set {
+        #[arg(value_parser = secret_var_parser())]
+        var: String,
+    },
+    /// Remove VAR from the Keychain.
+    Rm {
+        #[arg(value_parser = secret_var_parser())]
+        var: String,
+    },
+}
+
+/// Only the env vars the agent table forwards can be stored.
+fn secret_var_parser() -> PossibleValuesParser {
+    PossibleValuesParser::new(agents::secret_vars())
 }
 
 #[tokio::main]
@@ -58,17 +83,22 @@ async fn run(cli: Cli) -> Result<u8> {
     match cli.command {
         None => {
             let project = project_folder(None)?;
+            // Before any SDK call: secrets are read from msbx's environment when a VM boots.
+            secrets::resolve_from_keychain()?;
             sandbox::use_runtime(&attach::msb_path()?);
             tui::run(project, std::env::home_dir()).await?;
             Ok(0)
         }
         Some(Command::Agent { agent, path, args }) => {
             let project = project_folder(path)?;
+            secrets::resolve_from_keychain()?;
             sandbox::use_runtime(&attach::msb_path()?);
             let agent = agent.agent();
             let name = sandbox::ensure(agent, &project).await?;
             attach::exec(&name, agent.command, &args).await
         }
+        Some(Command::Secret(SecretAction::Set { var })) => secrets::set(&var),
+        Some(Command::Secret(SecretAction::Rm { var })) => secrets::rm(&var),
         Some(Command::External(args)) => attach::passthrough(&args),
     }
 }
@@ -148,6 +178,39 @@ mod tests {
             error
                 .to_string()
                 .contains("[possible values: codex, pi, shell]"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn secret_set_and_rm_take_a_known_var() -> Result<()> {
+        let Some(Command::Secret(SecretAction::Set { var })) =
+            Cli::try_parse_from(["msbx", "secret", "set", "OPENAI_API_KEY"])?.command
+        else {
+            bail!("expected secret set");
+        };
+        assert_eq!(var, "OPENAI_API_KEY");
+        let Some(Command::Secret(SecretAction::Rm { var })) =
+            Cli::try_parse_from(["msbx", "secret", "rm", "OPENAI_API_KEY"])?.command
+        else {
+            bail!("expected secret rm");
+        };
+        assert_eq!(var, "OPENAI_API_KEY");
+        assert!(Cli::try_parse_from(["msbx", "secret"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_secret_var_lists_the_valid_names() -> Result<()> {
+        let error = Cli::try_parse_from(["msbx", "secret", "set", "GITHUB_TOKEN"])
+            .err()
+            .context("an unknown var must not parse")?;
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(
+            error
+                .to_string()
+                .contains("[possible values: OPENAI_API_KEY]"),
             "{error}"
         );
         Ok(())

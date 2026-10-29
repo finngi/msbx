@@ -21,6 +21,9 @@ msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a sin
 - `msbx agent` starts a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
 - `msbx` opens a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, an Overview tab and a Logs tab.
 - `msbx ls`, `msbx logs NAME`, `msbx run IMAGE` and any other command run `msb` with the same arguments.
+- `msbx secret set OPENAI_API_KEY` keeps the key in the macOS Keychain, so you need not export it in every shell.
+- Sign in to Codex or pi once: the sign-in file lives on a per-agent volume shared by all sandboxes of that agent.
+- pi sees the local model servers on your Mac (Ollama, LM Studio) with no setup.
 - Sandbox defaults:
   - the project folder is mounted at the same path as on the host
   - all host CPUs, with a 32 GiB memory limit
@@ -65,13 +68,36 @@ msbx agent shell                # bash in the project sandbox
 msbx agent codex -- --version   # pass arguments through to the agent
 ```
 
-| Agent | Command in the VM | Host-side secret |
-|---|---|---|
-| `codex` | `codex` | `OPENAI_API_KEY`, sent only to `api.openai.com` |
-| `pi` | `pi` | none (uses local models on the host) |
-| `shell` | `bash` | none |
+| Agent | Command in the VM | Host-side secret | Shared sign-in |
+|---|---|---|---|
+| `codex` | `codex` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `/root/.codex/auth.json` |
+| `pi` | `pi` | none (uses local models on the host) | `/root/.pi/agent/auth.json` |
+| `shell` | `bash` | none | none |
 
 Sandbox settings are applied only when the sandbox is created. To change them, remove it with `msb rm -f <name>` and run `msbx agent` again.
+
+### Keep an API key in the Keychain
+
+```sh
+msbx secret set OPENAI_API_KEY   # security prompts for the value
+msbx secret rm OPENAI_API_KEY
+```
+
+On macOS, msbx reads each agent secret that is not set in your shell from the Keychain before it touches a sandbox. A variable exported in the shell wins. The value goes only into msbx's own environment, where microsandbox's secret proxy reads it; it is never printed or passed on a command line.
+
+### Sign in once
+
+Codex "Sign in with ChatGPT" and pi logins are kept on a named volume per agent, `msbx-login-codex` or `msbx-login-pi`, mounted at `/root/.msbx-login` in every sandbox of that agent. The sign-in file in the VM is a link to that volume, so a login or token refresh in one sandbox is seen by all of them, and it survives `msb rm`.
+
+- Codex: `msbx agent codex -- login --device-auth`, then `msbx agent codex` in any project.
+- pi: run `msbx agent pi`, then `/login`.
+- Sign out everywhere: stop the agent's sandboxes, then `msbx volume rm msbx-login-codex`.
+
+Sandboxes created before this feature have no login volume; msbx prints a note. Recreate them with `msb rm -f <name>`.
+
+### pi and local models
+
+Each time `msbx agent pi` starts, msbx writes `/root/.pi/agent/models.json` in the VM from your `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR/models.json`): only providers whose `baseUrl` is on `127.0.0.1`, `localhost`, `[::1]` or `0.0.0.0` are copied, with the host rewritten to `host.microsandbox.internal`. Providers with real cloud keys stay on the host. With no such file, msbx probes Ollama (`127.0.0.1:11434`) and LM Studio (`127.0.0.1:1234`) and lists the models they serve.
 
 ### Dashboard
 
