@@ -1,135 +1,183 @@
-# RFC 0008: Network: see a sandbox's policy and what it blocked
+# RFC 0008: Network: per-host policy through an msbx proxy
 
-- Status: Proposed
+- Status: Implemented
 - Tracking issue: [#13](https://github.com/finngi/msbx/issues/13)
 
 ## Summary
 
-The Overview tab shows each sandbox's network rules and how much data it has sent and received. Later on, an opt-in `balanced` preset will create sandboxes that deny network access by default. Those sandboxes get a Blocked tab that shows the hosts the agent tried to reach and was refused.
+Every msbx sandbox sends its outbound TCP traffic through a small HTTP CONNECT proxy that msbx runs on `127.0.0.1:47447`. The proxy applies `~/.config/msbx/policy.toml`, a Docker Sandboxes (`sbx`) style allow and deny list with three presets, to each connection by host name. Changes apply at once to new connections. The proxy keeps a log of what it allowed and blocked. You manage the policy with `msbx policy …` or from the dashboard's Network tab.
 
 ## Motivation
 
-People run coding agents in msbx so they can leave them working unattended without worrying. Today they can't see what a sandbox is allowed to reach, or whether anything was refused. The Overview only says `public + host`, and that default allows almost everything, so there isn't much to look at and no stricter setting to try.
+People run coding agents in msbx so they can leave them working unattended. Before this change a sandbox could reach the whole public internet, you could not see what it contacted, and the only way to narrow access was to recreate the sandbox with a different static policy.
 
-Showing the actual rules now, plus an opt-in stricter preset with a list of refused hosts, makes the policy visible and lets people tighten it.
+microsandbox fixes a sandbox's network policy and proxy when the sandbox is created (`SandboxModificationPatch` has no network field; `msb modify` has no network flags). It does, however, let a sandbox send its traffic through an outbound proxy of our choice. Putting the policy in that proxy is the one channel microsandbox offers for live control, so this belongs in msbx.
 
 ## Guide-level explanation
 
-### Overview (first release)
+### First run
 
-The "network" row becomes one line per rule. Rules use the same syntax as `msb create --net-rule`, so you can copy them into your own commands.
-
-```text
-network   allow@public
-          allow@host
-          allow@dns
-traffic   ↓ 48.2M  ↑ 3.1M
-```
-
-### Blocked tab (with `network = "balanced"`, follow-up release)
+The first `msbx agent` (or the dashboard's first create) asks once:
 
 ```text
-┌──────────────────────────┐  codex-api
-│ ● codex-api              │  Overview   Logs   Blocked (3)
-│ codex           ↵ attach │  ─────────────────────────────────────────
-│ ~/dev/xap/api            │  policy balanced · 3 blocked · last 12:04
-│ cpu ▮▯▯ 18%  mem 2.1G/32G│  Last seen ↓  Host               Hits
-│ stop  exec  remove       │  12:04:51     pypi.org              7
-└──────────────────────────┘  12:01:10     169.254.169.254       1
-                              11:58:02     cdn.jsdelivr.net      2
-                              a allow (shows recreate steps)
+Choose a network policy for msbx sandboxes:
+  1. Open        everything is allowed unless you deny it
+  2. Balanced    block by default; AI APIs, package registries and GitHub allowed
+  3. Locked Down block everything you have not allowed
+Preset [1-3, default 2]:
 ```
 
-- Each row is one host, newest first, with the number of times it was refused.
-- Press `a` on a row to see the steps for allowing that host.
+Without a terminal, msbx stops with `run msbx policy init <open|balanced|locked-down>`.
 
-### Allowing a host
+### Rules
 
-The popup shows these steps for you to run yourself.
+```sh
+msbx policy allow pypi.org,files.pythonhosted.org   # everywhere
+msbx policy deny "**.example.com" --sandbox codex-api
+msbx policy check pypi.org:443                      # Allowed / Blocked, exit 1 when blocked
+msbx policy ls --sandbox codex-api
+msbx policy log codex-api --blocked
+msbx policy preset locked-down
+```
 
-1. Add the host to `network_allow` in `~/.config/msbx/config.toml`.
-2. Remove the sandbox: `msb rm -f codex-api`.
-3. Create it again: `msbx agent codex ~/dev/xap/api`.
+| Target | Matches |
+|---|---|
+| `example.com` | that host, any port; not its subdomains |
+| `*.example.com` | one extra label: `api.example.com`; neither `v2.api.example.com` nor `example.com` |
+| `**.example.com` | one or more extra labels; not `example.com` itself |
+| `**` | everything |
+| any of the above with `:443` | that port only |
+| `10.0.0.1`, `[2001:db8::1]:443` | that address |
+| `10.0.0.0/8`, `2001:db8::/32` | that network, any port |
 
-Your project folder is mounted from your machine, so recreating the sandbox won't change it. Everything else in the sandbox is gone, including packages you've installed and shell history. msbx reinstalls the agent the next time it runs.
+Deny beats allow, whatever the source. Then any allow wins. Then the preset decides: Open allows, Balanced and Locked Down block. Balanced carries a short baseline (each agent's API host, Codex sign-in hosts, npm, Debian, PyPI, crates.io, Go, GitHub); `msbx policy ls` shows it with the source `preset`.
+
+### Dashboard
+
+The Network tab lists the selected sandbox's connections, blocked first, newest first:
+
+```text
+codex-api
+Overview   Logs   Network
+──────────────────────────────────────────────
+policy balanced · ↓ 48M  ↑ 3.1M · 2 blocked
+
+  ✗ pypi.org:443                 7  12:04:51
+▸ ✓ api.openai.com:443         42  12:04:50
+```
+
+`←`/`→` move the cursor, `a` allows the host for this sandbox, `A` everywhere, `d` denies it here, `p` picks a preset. Each key writes `policy.toml` and asks the proxy to reload it, so the next connection follows the change. The Overview's network row reads `policy balanced (proxied)` and a `traffic` row shows bytes in and out. Sandboxes created before this feature show `created before network policy; recreate with msb rm -f NAME`.
 
 ## Reference-level explanation
 
-- Rules come from the sandbox's stored config. Traffic comes from microsandbox's metrics. Both refresh every 2 seconds, along with the sandbox list.
-- Sandboxes created with `balanced` run microsandbox at debug log level. microsandbox then logs a line each time it refuses a DNS lookup, TCP connection or TLS handshake. msbx reads those lines, takes the host name (or the IP address when there is no name), and counts refusals per host.
+### Channels in microsandbox 0.7.11
 
-### Config keys
+| Fact | Source |
+|---|---|
+| A sandbox can be given one outbound proxy: `SandboxBuilder::proxy(\|p\| p.http_connect(addr).credentials(user, SecretSource::env(VAR)))`. | `microsandbox/lib/sandbox/builder.rs:752`, `microsandbox-network/lib/proxy/socks.rs:447,478`, `proxy/http_connect.rs:81` |
+| The password is read with `std::env::var` in the process that boots the VM. | `microsandbox-network/lib/model/config/resolver.rs:161`, `microsandbox/lib/runtime/spawn.rs:315` |
+| msb dials the proxy with `CONNECT <ip>:<port>` plus one `Proxy-Authorization: Basic` header; the target is a socket address, never a name. | `proxy/http_connect.rs:149-230` |
+| The proxy is used only for destinations that are not translated. Traffic to the host via `host.microsandbox.internal` bypasses it. | `proxy/types.rs:206` `select_for_destination`, `engine/netstack/poll.rs:540` |
+| The static policy is still evaluated on each SYN, before the proxy is dialled. Rules are first-match. | `engine/netstack/poll.rs:414`, `model/policy/types.rs:354` |
+| With an HTTP CONNECT proxy, non-DNS UDP is dropped. DNS goes through msb's gateway. | `engine/udp/relay.rs:385-415` |
+| The proxy applies to TLS-intercepted and plain TCP alike, so secret injection keeps working. | `sandbox/builder.rs` doc comment on `proxy` |
+| `Host` is classified before `Private`, so DNS and the model ports reach the gateway while private ranges stay denied. | `engine/policy/destination.rs:25-55` |
 
-These live in `~/.config/msbx/config.toml`. msbx uses them when it creates a sandbox, so changing them has no effect on existing sandboxes.
+### Sandbox creation (`sandbox.rs`)
 
-| Key | Values | Default | Effect |
-|---|---|---|---|
-| `network` | `"open"`, `"balanced"` | `"open"` | Policy for new sandboxes |
-| `network_allow` | list of hosts; `*.example.com` allowed | `[]` | Extra hosts that `balanced` allows |
-| `host` | `true`, `false` | `true` | Whether the sandbox can reach services on your machine |
+New sandboxes get the label `msbx.network=proxy`, the proxy `http_connect("127.0.0.1:47447")` with credentials (sandbox name, `SecretSource::env("MSBX_PROXY_TOKEN")`), and this static policy:
 
-`open` is how it works today: the public internet plus your machine.
+| Rule | Why |
+|---|---|
+| egress deny by default | private networks, loopback, link-local and metadata addresses match nothing |
+| allow host, UDP and TCP port 53 | DNS |
+| allow host, TCP 11434 and 1234 | Ollama and LM Studio; host traffic never reaches the proxy, so this is fixed at create |
+| allow public, TCP | the proxy decides per host |
 
-`balanced` blocks everything by default, then allows:
-- DNS
-- `deb.debian.org` and `security.debian.org`, for system packages
-- `registry.npmjs.org`, for agent installs
-- `github.com`, `*.github.com` and `*.githubusercontent.com`
-- the API host of each secret the agent uses, such as `api.openai.com`
-- every host in `network_allow`
-- your machine, if `host = true`
+`msbx.network` lets the dashboard and CLI tell proxied sandboxes from older ones.
 
-### Implementation notes
+### Token (`secrets.rs`, `proxy.rs`)
 
-- Policy rows: in `sandbox.rs`, format `NetworkSpec.policy.rules` as `--net-rule` tokens. Read rx/tx from `SandboxMetrics.net_rx_bytes` and `net_tx_bytes`. Add `network_rules: Vec<String>`, `rx_bytes` and `tx_bytes` to `SandboxInfo`.
-- Blocked tab: create `balanced` sandboxes with `.log_level(LogLevel::Debug)`. Call `handle.logs` with `sources: vec![LogSource::System]` and keep lines containing "denied by". Take the host from `domain=`, then `sni=`, then `dst=`. Keep `parse_denial(&str) -> Option<String>` and `tally(&[Denial])` pure, and test them against sample lines.
-- There is no way to modify the policy, because `SandboxModificationPatch` has no network field, and `msb modify` has no `--net` flags.
-- Prior art: tobi/wrap reads denials the same way. It has no licence, so use the idea only.
+`$XDG_STATE_HOME/msbx/proxy-token` holds 32 random bytes as hex, mode 600, created on first use. msbx re-runs itself once with `MSBX_PROXY_TOKEN` (and any Keychain secrets) in its environment, the same mechanism as before, so the SDK and `msb` can resolve the credential. `msbx start NAME` passes through `msb` with the variable set; plain `msb start` without it fails to start a proxied sandbox.
+
+### The proxy (`proxy.rs`, `wire.rs`)
+
+1. Read the request head (at most 8 KiB, 10 s).
+2. `GET /msbx-status` answers `{"msbx":"<version>","pid":N,"policy":"<path>"}` without credentials. `POST /msbx-stop` needs the token. Anything else that is not a `CONNECT` gets `400`.
+3. A `CONNECT` without the token, or with a wrong one, gets `407` with `Proxy-Authenticate: Basic` and nothing else (RFC 9110 §11.7.1, §15.5.8). The Basic username is the sandbox name.
+4. Reply `200 Connection established`, then read the guest's first bytes (up to 16 KiB, 2 s). A TLS ClientHello gives the `server_name` extension (RFC 8446 §4.1.2; RFC 6066 §3: type 0, `host_name` entries only, ASCII, no trailing dot), reassembled across records (RFC 8446 §5.1). An HTTP/1.x request gives `Host` without its port (RFC 9110 §7.2, RFC 9112 §3). Server-first protocols send nothing in 2 s and give no name.
+5. Anti-spoofing: resolve the name on the host (`tokio::net::lookup_host`, 1.5 s). The name counts only when the CONNECT address is among the answers; otherwise the decision is on the IP alone and the log rule ends in `(name-mismatch <name>)`.
+6. Decide with the current policy, log, then either connect to the CONNECT address (never a re-resolved one), write the buffered bytes and `tokio::io::copy_bidirectional`, or close the guest side.
+
+At most 512 tunnels are open at once; past that, new tunnels get `503`. Requests still being read have their own limit, so status, reload and stop always get through. msbx's own edits (`msbx policy`, the TUI keys) send an authenticated reload request, and the proxy applies the file before it replies. Hand edits are picked up when the file's modification time or size changes, checked once a second. A file that fails to parse keeps the last good policy and logs a warning. The log aggregates per (sandbox, host or IP, port, decision, rule) with count and first/last seen, capped at 5,000 rows, flushed atomically to `network-log.json` every 2 s when it changed and at shutdown.
+
+### Lifecycle
+
+`msbx proxy serve` runs in the foreground; `status` probes `/msbx-status`; `stop` sends the authenticated stop. `msbx agent`, the dashboard (when a policy exists), and `msbx <msb command>` pass-through first ensure a proxy answers: if nothing listens, msbx spawns `msbx proxy serve` in a new process group with its output in `$XDG_STATE_HOME/msbx/proxy.log` and waits up to 2 s. A proxy of another msbx version keeps running with a note to run `msbx proxy stop`. Another program on the port is an error.
+
+### Policy file
+
+`$XDG_CONFIG_HOME/msbx/policy.toml`, default `~/.config/msbx/policy.toml` on macOS too (RFC 0002):
+
+```toml
+preset = "balanced"
+allow = ["pypi.org", "*.example.com:443"]
+deny = ["evil.test"]
+
+[sandboxes.codex-api]
+allow = ["box-only.test"]
+deny = ["**"]
+```
+
+Written atomically (temp file and rename, mode 600). Hand edits work; unknown keys are an error naming the key. A missing file means "not initialised".
+
+### Tests
+
+- `policy.rs`: grammar accept and reject tables, matching for each form, deny over allow across preset, global and sandbox, per-sandbox isolation, preset defaults, file round trip, unknown key, mode 600.
+- `wire.rs`: SNI from a ClientHello captured from curl (one record, split records, no SNI, garbage), `Host` with and without port, absent, oversized; CONNECT parsing and Basic auth.
+- `proxy.rs`: in-process proxy on an ephemeral port with an echo server: 407, relay, block, live edit, broken file, log flush.
+- `app.rs` and `ui.rs`: keys and snapshots for the Network tab and preset popup.
+- `sandbox.rs`: an ignored real-VM test (Locked Down plus one host, blocked host, live allow, log rows).
 
 ## Drawbacks
 
-- microsandbox does not log allowed connections. msbx can show only total bytes sent and received, so there is no "Allowed" list of contacted hosts.
-- Refused connections are only logged at debug level, and only for sandboxes created with that level. Sandboxes created with `open`, or before this feature existed, have no Blocked tab.
-- The log lines are microsandbox's internal diagnostics with no stable format, so a microsandbox upgrade can break the Blocked tab. msbx pins its microsandbox version for this reason.
-- The runtime log only keeps recent history, so older refusals drop out of the list.
-- A refused connection to a bare IP address shows only the IP.
-- You cannot change a sandbox's network policy after creating it, whether it is running or stopped. That is why allowing a host means recreating the sandbox.
-- With `open`, very little is refused: only private networks and cloud metadata addresses. The Blocked tab would be almost empty, which is why it only comes with `balanced`.
+- One more process. The proxy outlives msbx, like the sandboxes it serves, and must be running for proxied sandboxes to reach anything.
+- Port 47447 is baked into every sandbox and cannot change.
+- The host name is only as good as the guest's first bytes. Protocols that send no name are decided by IP.
+- The anti-spoofing check can block a legitimate connection when DNS answers differ between the guest's lookup and the host's (round-robin, CDNs with short TTLs). The log shows `name-mismatch` so you can allow the IP or CIDR.
+- Host access cannot be changed live: it is fixed at create to the model ports.
 
 ## Security
 
-- With `host = true`, the sandbox can reach every service listening on your machine's 127.0.0.1. That includes databases, Ollama, other sandboxes' published ports and msbx's own port forwards. Set `host = false` if your agent does not need a local model.
-- `balanced` limits where a misbehaving agent can send data, but allowed hosts like `github.com` can still receive it.
-- Debug logs record the host names the agent looked up. The logs stay in microsandbox's directory on your machine.
+- The token stops other local processes, and a sandbox that could reach the port, from spoofing a sandbox name. The username is informational once the token matches.
+- The proxy never logs payloads or credentials. The log holds host names, ports, counts and times.
+- DNS still resolves any name, and allowed hosts can still receive data.
+- Non-TLS, non-HTTP traffic is decided by IP. A guest that lies in its SNI or `Host` is caught when the name does not resolve to the CONNECT address.
+- The proxy binds loopback only. Its status endpoint is unauthenticated and reveals the msbx version, pid and policy path.
+
+See the [security model](../explanation/security-model.md).
 
 ## Rationale and alternatives
 
-- Overview rows now (chosen over the full sbx table): microsandbox does not record allowed connections, so an "Allowed / Blocked" table with hit counts would mostly be invented. Listing the rules and total traffic is cheap and accurate today.
-- Blocked tab only with `balanced`: under `open` almost nothing is refused, so the tab would sit empty. It is worth building only once a stricter policy exists.
-- Reading microsandbox's debug log lines now (chosen over waiting for an upstream API): this works today with the pinned version. It is fragile because the lines are internal diagnostics. Waiting means no feature until microsandbox adds a policy-event API. We read the logs now, keep the parsing in one small tested function, and ask upstream for a proper API.
-- "Allow" shows the recreate steps and applies nothing: microsandbox cannot change a sandbox's policy after it is created. Recreating automatically would silently delete guest state, so we show the steps and let the user decide.
-- `balanced` contents: only what msbx's own install scripts and agents need (Debian packages, npm, GitHub, each agent's API host), plus `network_allow`. A long curated list like sbx's would be guesswork to maintain. Users can add hosts as they see refusals.
-- Doing nothing: users keep the broad default, can't see what the agent may reach, and have no easy way to lock it down.
+- A CONNECT proxy over SOCKS5. msb sends a socket address either way, and CONNECT has standard Basic authentication the SDK exposes through `credentials`. SOCKS5 would add UDP relay, which this design does not need.
+- Deciding in the proxy, with no recreate: microsandbox cannot change a running sandbox's policy, and recreating loses guest state. The proxy is the only live channel.
+- One fixed port for all sandboxes: the port is persisted in each sandbox, and one proxy serves all of them.
+- Reading first bytes, where the previous design read msb's debug lines: msb does not log allowed connections, and its log lines are internal diagnostics. The proxy sees every public TCP connection.
+- Doing nothing: the broad default stays, with nothing to see and no way to tighten it.
 
 ## Prior art
 
-- Docker sbx ([usage](https://docs.docker.com/ai/sandboxes/usage/), [policies](https://docs.docker.com/ai/sandboxes/security/policy/)): a network panel with a connection log (host, hits, allowed or blocked), inline allow/block, and the presets Open, Balanced and Locked Down. Rule changes there apply live.
-- [tobi/wrap](https://github.com/tobi/wrap): `wrap log` lists denied egress by reading microsandbox system logs at debug level. `wrap allow HOST` adds the host to a config file. The repo has no licence, so we take the ideas only.
-- [skalenetwork/microsandbox-reef](https://github.com/skalenetwork/microsandbox-reef) (MIT): an msb-based agent manager. Useful only for its handling of the SDK.
-- [Freudenjunge/microsandbox-tui](https://github.com/Freudenjunge/microsandbox-tui): another TUI for microsandbox. Its licence is unclear, so ideas only.
+- Docker Sandboxes ([policies](https://docs.docker.com/ai/sandboxes/security/policy/), [policy concepts](https://docs.docker.com/ai/sandboxes/governance/concepts/), [monitoring](https://docs.docker.com/ai/sandboxes/governance/monitor-and-enforce/monitoring/)): the presets Open, Balanced and Locked Down; `example.com`, `*.example.com`, `**.example.com`, ports and CIDRs; "Deny wins"; `sbx policy ls|allow|deny|rm|check|init|log`; a log with BLOCKED and ALLOWED sections; rules apply immediately. This design copies the surface and the semantics.
+- [tobi/wrap](https://github.com/tobi/wrap): reads denials from microsandbox's debug log. No licence, so ideas only. Superseded here by the proxy, which also sees allowed connections.
+- microsandbox's own `--proxy` option and `SandboxBuilder::proxy`: the channel this design is built on.
 
 ## Unresolved questions
 
-- What log level does the msb runtime use by default? This needs a real-VM check.
-- How noisy and how large does the runtime log get at debug level during a long agent session?
-- Does codex sign-in need `chatgpt.com` or `auth.openai.com` in `balanced`?
-- Should `balanced` keep `host = true` by default, given that pi needs a local model?
-- Will microsandbox accept a request for a stable policy-event API, or for changing the policy on a running sandbox?
+- Whether a per-sandbox proxy username should also be checked against the sandbox list, so a renamed or removed sandbox's credentials stop working.
+- Whether to cache host lookups, trading freshness for fewer `name-mismatch` results.
 
 ## Future possibilities
 
-- Allowing or blocking a host on a running sandbox. microsandbox has no way to do this.
-- Editing `network_allow` from the TUI. The popup only shows the steps.
-- Recreating sandboxes automatically.
-- An "Allowed" list or traffic per host.
-- Presets other than `open` and `balanced`.
+- HTTP-layer rules (method and path), as sbx has.
+- An approval flow for blocked hosts from the dashboard.
+- Allowing the host group live, if microsandbox gains a way to change a running sandbox's policy.

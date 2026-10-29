@@ -1,10 +1,11 @@
-//! Agent API keys from the macOS Keychain, through Apple's `security` CLI. Host side only.
+//! Host-side values the SDK reads from msbx's environment when it boots a VM: agent API keys
+//! from the macOS Keychain (through Apple's `security` CLI) and the network proxy token.
 //!
-//! The SDK reads a forwarded secret from msbx's own environment when it boots a VM, so a
-//! Keychain value must be in that environment first. Rust 2024 makes `std::env::set_var`
-//! unsafe (and this crate forbids `unsafe`), so msbx re-runs itself once with the values added
-//! to the child's environment instead. The values are never printed, logged or passed as
-//! arguments; `msbx secret set` lets `security` prompt for the value, so msbx never sees it.
+//! The SDK and `msb` resolve a secret or proxy password with `std::env::var` at spawn time, so
+//! a value must be in that environment first. Rust 2024 makes `std::env::set_var` unsafe (and
+//! this crate forbids `unsafe`), so msbx re-runs itself once with the values added to the
+//! child's environment instead. The values are never printed, logged or passed as arguments;
+//! `msbx secret set` lets `security` prompt for the value, so msbx never sees it.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -12,13 +13,14 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
-use crate::agents;
+use crate::paths::Dirs;
+use crate::{agents, proxy};
 
 /// Keychain service name; the env var is the account.
 const SERVICE: &str = "msbx";
 
 /// Set in the re-run's environment so a second run never re-execs again.
-const RESOLVED_GUARD: &str = "MSBX_KEYCHAIN_RESOLVED";
+const RESOLVED_GUARD: &str = "MSBX_ENV_RESOLVED";
 
 /// `msbx secret set VAR`: `security` prompts for the value on the terminal. Returns its exit code.
 pub(crate) fn set(var: &str) -> Result<u8> {
@@ -54,18 +56,25 @@ fn find_args(var: &str) -> [&str; 6] {
     ["find-generic-password", "-s", SERVICE, "-a", var, "-w"]
 }
 
-/// Re-runs msbx with Keychain values for every agent secret var that is unset or empty in the
-/// environment. Returns normally when there is nothing to add; on success it never returns.
-/// A shell variable always wins over the Keychain. Not macOS, or no `security`: nothing happens.
-pub(crate) fn resolve_from_keychain() -> Result<()> {
-    if !cfg!(target_os = "macos") || std::env::var_os(RESOLVED_GUARD).is_some() {
+/// Re-runs msbx with the proxy token and, on macOS, Keychain values for every agent secret var
+/// that is unset or empty in the environment. Returns normally when there is nothing to add;
+/// on success it never returns. A shell variable always wins.
+pub(crate) fn resolve_environment(dirs: &Dirs) -> Result<()> {
+    if std::env::var_os(RESOLVED_GUARD).is_some() {
         return Ok(());
     }
-    let found: Vec<(&str, String)> =
-        missing_vars(&agents::secret_vars(), |var| std::env::var(var).ok())
-            .into_iter()
-            .filter_map(|var| Some((var, keychain_value(var)?)))
-            .collect();
+    let lookup = |var: &str| std::env::var(var).ok();
+    let mut found: Vec<(&str, String)> = Vec::new();
+    if cfg!(target_os = "macos") {
+        found.extend(
+            missing_vars(&agents::secret_vars(), lookup)
+                .into_iter()
+                .filter_map(|var| Some((var, keychain_value(var)?))),
+        );
+    }
+    if !missing_vars(&[proxy::TOKEN_VAR], lookup).is_empty() {
+        found.push((proxy::TOKEN_VAR, proxy::token(dirs)?));
+    }
     if found.is_empty() {
         return Ok(());
     }
@@ -74,7 +83,7 @@ pub(crate) fn resolve_from_keychain() -> Result<()> {
     #[cfg(unix)]
     {
         let error = std::os::unix::process::CommandExt::exec(&mut command);
-        Err(error).with_context(|| format!("re-running {} with Keychain secrets", exe.display()))
+        Err(error).with_context(|| format!("re-running {} with host-side values", exe.display()))
     }
     #[cfg(not(unix))]
     {
@@ -198,12 +207,16 @@ mod tests {
     #[test]
     fn reexec_keeps_args_and_adds_values_and_guard() {
         let args = ["agent", "codex", "--", "--version"].map(OsString::from);
-        let found = [("OPENAI_API_KEY", "sk-test".to_owned())];
+        let found = [
+            ("OPENAI_API_KEY", "sk-test".to_owned()),
+            (proxy::TOKEN_VAR, "tok".to_owned()),
+        ];
         let command = reexec_command(Path::new("/opt/bin/msbx"), args.clone(), &found);
         assert_eq!(command.get_program(), "/opt/bin/msbx");
         assert!(command.get_args().eq(args.iter().map(OsString::as_os_str)));
         let envs: Vec<_> = command.get_envs().collect();
         assert!(envs.contains(&("OPENAI_API_KEY".as_ref(), Some("sk-test".as_ref()))));
+        assert!(envs.contains(&("MSBX_PROXY_TOKEN".as_ref(), Some("tok".as_ref()))));
         assert!(envs.contains(&(RESOLVED_GUARD.as_ref(), Some("1".as_ref()))));
     }
 }

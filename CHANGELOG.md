@@ -18,9 +18,14 @@ Before 1.0.0, minor versions may contain breaking changes.
 - Shared sign-ins (RFC 0004, `agent` scope): Codex and pi `auth.json` files are linked to a per-agent volume `msbx-login-<agent>`, so one sign-in serves every sandbox of that agent and survives `msb rm`.
 - pi sandboxes get `/root/.pi/agent/models.json` with the host's local model servers: loopback providers from the host's pi `models.json`, else Ollama and LM Studio found by probing.
 - The `OPENAI_API_KEY is not set` note now suggests `msbx secret set`.
+- Network policy (RFC 0008): new sandboxes send public TCP traffic through the msbx proxy on `127.0.0.1:47447`, which applies `~/.config/msbx/policy.toml` live: presets `open`, `balanced` and `locked-down`, sbx-style targets (`example.com`, `*.example.com`, `**.example.com`, `**`, `:port`, IPs, CIDRs), global and per-sandbox allow and deny rules, deny over allow.
+- `msbx policy init|ls|allow|deny|rm|check|log|preset` and `msbx proxy serve|status|stop`. The first `msbx agent` asks for a preset.
+- Dashboard: a Network tab per sandbox with the proxy's log (`a` allow here, `A` allow everywhere, `d` deny, `p` preset), `policy <preset> (proxied)` and a traffic row on the Overview.
+- `msbx start NAME` and other pass-through commands put the proxy token in `msb`'s environment and start the proxy when needed.
 
 ### Changed
 
+- Sandbox network defaults: deny by default, DNS and the Ollama and LM Studio ports to the host, public TCP through the proxy. Sandboxes created earlier keep `public + host` and ignore the policy.
 - `msbx run` is renamed `msbx agent`; `msbx run` now passes through to `msb run`.
 
 [unreleased]: https://github.com/finngi/msbx/commits/main

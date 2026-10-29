@@ -110,6 +110,19 @@ pub(crate) fn secret_vars() -> Vec<&'static str> {
     vars
 }
 
+/// Every host any agent's secret may be sent to, in table order without repeats.
+pub(crate) fn secret_hosts() -> Vec<&'static str> {
+    let mut hosts = Vec::new();
+    for agent in AgentId::value_variants().iter().map(|id| id.agent()) {
+        for secret in agent.secrets {
+            if !hosts.contains(&secret.host) {
+                hosts.push(secret.host);
+            }
+        }
+    }
+    hosts
+}
+
 /// Splits an agent's secrets into those set on the host and the names of those that are not.
 /// Only presence is checked: the value itself is read by the SDK from the host environment each
 /// time the sandbox starts. An empty value counts as unset because the SDK rejects it at start.
@@ -170,6 +183,11 @@ mod tests {
     #[test]
     fn secret_vars_lists_each_var_once() {
         assert_eq!(secret_vars(), ["OPENAI_API_KEY"]);
+    }
+
+    #[test]
+    fn secret_hosts_lists_each_host_once() {
+        assert_eq!(secret_hosts(), ["api.openai.com"]);
     }
 
     #[test]

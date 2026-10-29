@@ -38,11 +38,15 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Tests that boot a real microVM are marked `#[ignore]` and do not run in CI. Run them locally before changing sandbox code:
+Tests that boot a real microVM are marked `#[ignore]` and do not run in CI. Run them locally before changing sandbox code, with every msbx path pointed at temporary folders and a one-off proxy token, one test at a time (they share the proxy port):
 
 ```sh
-cargo test -- --ignored
+XDG_CONFIG_HOME=$(mktemp -d) XDG_STATE_HOME=$(mktemp -d) \
+MSBX_PROXY_TOKEN=$(openssl rand -hex 16) MSBX_TEST_SECRET=msbx-test-secret-$RANDOM$RANDOM \
+cargo test -- --ignored --test-threads=1
 ```
+
+Stop a running `msbx proxy` first: the tests bind its port.
 
 ### Snapshot tests
 

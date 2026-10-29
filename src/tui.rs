@@ -15,9 +15,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::agents::{self, Agent, AgentId};
-use crate::app::{Action, App};
-use crate::model::SandboxInfo;
-use crate::{attach, sandbox, ui};
+use crate::app::{Action, App, Popup};
+use crate::model::{NetEntry, SandboxInfo};
+use crate::netlog::{self, Log};
+use crate::paths::Dirs;
+use crate::policy::{self, Policy, Preset, Target};
+use crate::{attach, proxy, sandbox, ui};
 
 /// Redraws happen at most this often, and only when something changed.
 const FRAME: Duration = Duration::from_millis(33);
@@ -34,6 +37,8 @@ enum Step {
     Job(Job),
     /// Needs the real terminal, so the TUI is suspended around it.
     Suspend(Foreground),
+    /// A small, immediate edit of `policy.toml`.
+    Policy(Edit),
 }
 
 #[derive(Debug, PartialEq)]
@@ -60,12 +65,32 @@ enum Foreground {
     },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Edit {
+    Allow {
+        target: String,
+        sandbox: Option<String>,
+    },
+    Deny {
+        target: String,
+        sandbox: Option<String>,
+    },
+    Preset {
+        preset: Preset,
+        then_create: bool,
+    },
+}
+
 /// Results background tasks send back to the event loop, the single owner of [`App`].
 enum Message {
     Sandboxes(Result<Vec<SandboxInfo>>),
     Logs {
         name: String,
         logs: Result<Vec<String>>,
+    },
+    Network {
+        policy: Option<Preset>,
+        entries: Vec<NetEntry>,
     },
     Status(String),
 }
@@ -78,7 +103,7 @@ struct Session {
 }
 
 impl Session {
-    fn start(sender: UnboundedSender<Message>) -> Self {
+    fn start(sender: UnboundedSender<Message>, dirs: Dirs) -> Self {
         let refresh = tokio::spawn(async move {
             let mut ticks = interval(REFRESH);
             loop {
@@ -87,6 +112,14 @@ impl Session {
                     .send(Message::Sandboxes(sandbox::list().await))
                     .is_err()
                 {
+                    return;
+                }
+                let read_dirs = dirs.clone();
+                let (policy, entries) =
+                    tokio::task::spawn_blocking(move || read_network(&read_dirs))
+                        .await
+                        .unwrap_or_default();
+                if sender.send(Message::Network { policy, entries }).is_err() {
                     return;
                 }
             }
@@ -104,6 +137,28 @@ impl Drop for Session {
     }
 }
 
+/// The preset and the proxy's connection log, as the Network tab shows them. Unreadable files
+/// show as "not initialised" / no rows rather than stopping the TUI.
+fn read_network(dirs: &Dirs) -> (Option<Preset>, Vec<NetEntry>) {
+    let policy = policy::load(&dirs.policy_file())
+        .ok()
+        .flatten()
+        .map(|policy| policy.preset);
+    let log = Log::load(&dirs.network_log()).unwrap_or_default();
+    let entries = netlog::sorted(log.entries(), None)
+        .into_iter()
+        .map(|entry| NetEntry {
+            sandbox: entry.sandbox.clone(),
+            host: entry.host.clone(),
+            port: entry.port,
+            allowed: entry.allowed,
+            count: entry.count,
+            last_seen: netlog::local_time(entry.last_seen, "%H:%M:%S"),
+        })
+        .collect();
+    (policy, entries)
+}
+
 /// The name `msbx agent` gives `agent`'s sandbox for `project`; empty for an unknown agent.
 pub(crate) fn preview_name(agent: &str, project: &Path) -> String {
     agents::find(agent).map_or_else(String::new, |agent| sandbox::sandbox_name(agent, project))
@@ -111,22 +166,24 @@ pub(crate) fn preview_name(agent: &str, project: &Path) -> String {
 
 /// Runs the TUI until the user quits. The terminal is restored on every return path; a panic
 /// is covered by the hook `ratatui::try_init` installs.
-pub(crate) async fn run(project: PathBuf, home: Option<PathBuf>) -> Result<()> {
+pub(crate) async fn run(project: PathBuf, home: Option<PathBuf>, dirs: Dirs) -> Result<()> {
     let agents = AgentId::value_variants()
         .iter()
         .map(|id| id.agent().id)
         .collect();
     let mut app = App::new(project, home, agents, preview_name);
+    let (policy, entries) = read_network(&dirs);
+    app.set_network(policy, entries);
     let mut terminal = ratatui::try_init().context("setting up the terminal")?;
-    let result = event_loop(&mut terminal, &mut app).await;
+    let result = event_loop(&mut terminal, &mut app, &dirs).await;
     ratatui::restore();
     result
 }
 
-async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+async fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, dirs: &Dirs) -> Result<()> {
     let (sender, mut receiver) = unbounded_channel();
-    while let Some(foreground) = live(terminal, app, &sender, &mut receiver).await? {
-        app.status_line = Some(suspend(terminal, foreground).await?);
+    while let Some(foreground) = live(terminal, app, &sender, &mut receiver, dirs).await? {
+        app.status_line = Some(suspend(terminal, foreground, dirs).await?);
     }
     Ok(())
 }
@@ -137,8 +194,9 @@ async fn live(
     app: &mut App,
     sender: &UnboundedSender<Message>,
     receiver: &mut UnboundedReceiver<Message>,
+    dirs: &Dirs,
 ) -> Result<Option<Foreground>> {
-    let mut session = Session::start(sender.clone());
+    let mut session = Session::start(sender.clone(), dirs.clone());
     let mut frames = interval(FRAME);
     frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut dirty = true;
@@ -160,8 +218,9 @@ async fn live(
                             if let Some(progress) = progress(&job) {
                                 app.status_line = Some(progress);
                             }
-                            tokio::spawn(run_job(job, sender.clone()));
+                            tokio::spawn(run_job(job, sender.clone(), dirs.clone()));
                         }
+                        Ok(Step::Policy(edit)) => edit_policy(app, dirs, edit).await,
                         Err(error) => app.status_line = Some(format!("{error:#}")),
                     }
                 }
@@ -193,7 +252,85 @@ fn step(action: Action, sandboxes: &[SandboxInfo]) -> Result<Step> {
             agent: agents::find(&agent).with_context(|| format!("unknown agent {agent}"))?,
             project,
         }),
+        Action::Allow { target, sandbox } => Step::Policy(Edit::Allow { target, sandbox }),
+        Action::Deny { target, sandbox } => Step::Policy(Edit::Deny { target, sandbox }),
+        Action::SetPreset {
+            preset,
+            then_create,
+        } => Step::Policy(Edit::Preset {
+            preset,
+            then_create,
+        }),
     })
+}
+
+/// Applies a policy edit at once (a tiny file write), asks the proxy to reload it, and reports
+/// it on the status line. The Network tab's preset updates right away.
+async fn edit_policy(app: &mut App, dirs: &Dirs, edit: Edit) {
+    let then_create = matches!(
+        edit,
+        Edit::Preset {
+            then_create: true,
+            ..
+        }
+    );
+    let preset = match &edit {
+        Edit::Preset { preset, .. } => Some(*preset),
+        Edit::Allow { .. } | Edit::Deny { .. } => None,
+    };
+    match apply_edit(dirs, edit) {
+        Ok(status) => {
+            app.status_line = Some(match proxy::reload(dirs).await {
+                Ok(()) => status,
+                Err(error) => format!("{status}; {error:#}"),
+            });
+            if let Some(preset) = preset {
+                app.policy = Some(preset);
+            }
+            if then_create {
+                app.popup = Some(Popup::Create { agent_index: 0 });
+            }
+        }
+        Err(error) => app.status_line = Some(format!("{error:#}")),
+    }
+}
+
+fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<String> {
+    let path = dirs.policy_file();
+    let (mut policy, status) = match edit {
+        Edit::Preset {
+            preset,
+            then_create: _,
+        } => {
+            let mut policy = policy::load(&path)?.unwrap_or_else(|| Policy::new(preset));
+            policy.preset = preset;
+            (policy, format!("network preset: {preset}"))
+        }
+        Edit::Allow { target, sandbox } => {
+            let parsed = Target::parse(&target)?;
+            let mut policy = policy::load(&path)?.context("network policy is not initialised")?;
+            policy.allow(&[parsed], sandbox.as_deref());
+            (policy, edit_status("allowed", &target, sandbox.as_deref()))
+        }
+        Edit::Deny { target, sandbox } => {
+            let parsed = Target::parse(&target)?;
+            let mut policy = policy::load(&path)?.context("network policy is not initialised")?;
+            policy.deny(&[parsed], sandbox.as_deref());
+            (policy, edit_status("denied", &target, sandbox.as_deref()))
+        }
+    };
+    policy
+        .sandboxes
+        .retain(|_, rules| !rules.allow.is_empty() || !rules.deny.is_empty());
+    policy::save(&path, &policy)?;
+    Ok(status)
+}
+
+fn edit_status(verb: &str, target: &str, sandbox: Option<&str>) -> String {
+    match sandbox {
+        Some(name) => format!("{verb} {target} for {name}"),
+        None => format!("{verb} {target} everywhere"),
+    }
 }
 
 /// The agent recorded in sandbox `name`'s `msbx.agent` label.
@@ -217,14 +354,14 @@ fn progress(job: &Job) -> Option<String> {
 }
 
 // Send errors only mean the TUI has quit, leaving nobody to tell.
-async fn run_job(job: Job, sender: UnboundedSender<Message>) {
+async fn run_job(job: Job, sender: UnboundedSender<Message>, dirs: Dirs) {
     let (result, done, name) = match job {
         Job::Logs(name) => {
             let logs = sandbox::logs(&name, LOG_LINES).await;
             let _ = sender.send(Message::Logs { name, logs });
             return;
         }
-        Job::Start(name) => (sandbox::start(&name).await, "started", name),
+        Job::Start(name) => (start(&name, &dirs).await, "started", name),
         Job::Stop(name) => (sandbox::stop(&name).await, "stopped", name),
         Job::Remove(name) => (sandbox::remove(&name).await, "removed", name),
     };
@@ -236,6 +373,12 @@ async fn run_job(job: Job, sender: UnboundedSender<Message>) {
     let _ = sender.send(Message::Sandboxes(sandbox::list().await));
 }
 
+/// A started sandbox dials the proxy at once, so make sure one is there first.
+async fn start(name: &str, dirs: &Dirs) -> Result<()> {
+    proxy::ensure_running(dirs).await?;
+    sandbox::start(name).await
+}
+
 fn apply(app: &mut App, message: Message) {
     match message {
         Message::Sandboxes(Ok(sandboxes)) => app.set_sandboxes(sandboxes),
@@ -243,6 +386,7 @@ fn apply(app: &mut App, message: Message) {
             name,
             logs: Ok(logs),
         } => app.set_logs(&name, logs),
+        Message::Network { policy, entries } => app.set_network(policy, entries),
         Message::Sandboxes(Err(error))
         | Message::Logs {
             logs: Err(error), ..
@@ -255,9 +399,13 @@ fn apply(app: &mut App, message: Message) {
 
 /// Hands the real terminal to `foreground`, then brings the TUI back. Returns the status line
 /// to show; a failure of `foreground` itself is reported there rather than ending the TUI.
-async fn suspend(terminal: &mut DefaultTerminal, foreground: Foreground) -> Result<String> {
+async fn suspend(
+    terminal: &mut DefaultTerminal,
+    foreground: Foreground,
+    dirs: &Dirs,
+) -> Result<String> {
     ratatui::restore();
-    let outcome = run_foreground(foreground).await;
+    let outcome = run_foreground(foreground, dirs).await;
     *terminal = ratatui::try_init().context("resuming the TUI")?;
     // The new terminal's buffers are blank, so wiping the screen is all a clear needs.
     // `Terminal::clear` would also query the cursor position, a round trip some PTYs never answer.
@@ -268,9 +416,10 @@ async fn suspend(terminal: &mut DefaultTerminal, foreground: Foreground) -> Resu
     Ok(outcome.unwrap_or_else(|error| format!("{error:#}")))
 }
 
-async fn run_foreground(foreground: Foreground) -> Result<String> {
+async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
     let (name, code) = match foreground {
         Foreground::Attach { name, agent } => {
+            proxy::ensure_running(dirs).await?;
             sandbox::prepare_existing(&name, agent).await?;
             let code = attach::exec(&name, agent.command, &[]).await?;
             (name, code)
@@ -280,6 +429,7 @@ async fn run_foreground(foreground: Foreground) -> Result<String> {
             (name, code)
         }
         Foreground::Create { agent, project } => {
+            proxy::ensure_running(dirs).await?;
             let name = sandbox::ensure(agent, &project).await?;
             let code = attach::exec(&name, agent.command, &[]).await?;
             (name, code)
@@ -306,6 +456,9 @@ mod tests {
             memory_limit_bytes: None,
             uptime: None,
             network: None,
+            proxied: true,
+            rx_bytes: None,
+            tx_bytes: None,
             secrets: Vec::new(),
             mounts: Vec::new(),
         }
@@ -340,6 +493,167 @@ mod tests {
         for (action, job) in cases {
             assert_eq!(step_for(action)?, Step::Job(job));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn policy_actions_become_edits() -> Result<()> {
+        assert_eq!(
+            step_for(Action::Allow {
+                target: name("pypi.org"),
+                sandbox: Some(name("codex-api"))
+            })?,
+            Step::Policy(Edit::Allow {
+                target: name("pypi.org"),
+                sandbox: Some(name("codex-api"))
+            })
+        );
+        assert_eq!(
+            step_for(Action::Deny {
+                target: name("pypi.org"),
+                sandbox: None
+            })?,
+            Step::Policy(Edit::Deny {
+                target: name("pypi.org"),
+                sandbox: None
+            })
+        );
+        assert_eq!(
+            step_for(Action::SetPreset {
+                preset: Preset::Open,
+                then_create: true
+            })?,
+            Step::Policy(Edit::Preset {
+                preset: Preset::Open,
+                then_create: true
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn edits_initialise_and_change_the_policy_file() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("msbx-tui-edit-{}", std::process::id()));
+        let dirs = Dirs {
+            config: root.join("config"),
+            state: root.join("state"),
+        };
+        let outcome = (|| -> Result<()> {
+            let missing = apply_edit(
+                &dirs,
+                Edit::Allow {
+                    target: name("pypi.org"),
+                    sandbox: None,
+                },
+            );
+            assert!(missing.is_err(), "allow before init");
+            assert_eq!(
+                apply_edit(
+                    &dirs,
+                    Edit::Preset {
+                        preset: Preset::LockedDown,
+                        then_create: true
+                    }
+                )?,
+                "network preset: locked-down"
+            );
+            assert_eq!(
+                apply_edit(
+                    &dirs,
+                    Edit::Allow {
+                        target: name("pypi.org"),
+                        sandbox: Some(name("codex-api"))
+                    }
+                )?,
+                "allowed pypi.org for codex-api"
+            );
+            assert_eq!(
+                apply_edit(
+                    &dirs,
+                    Edit::Deny {
+                        target: name("evil.test"),
+                        sandbox: None
+                    }
+                )?,
+                "denied evil.test everywhere"
+            );
+            assert_eq!(
+                apply_edit(
+                    &dirs,
+                    Edit::Preset {
+                        preset: Preset::Open,
+                        then_create: false
+                    }
+                )?,
+                "network preset: open"
+            );
+            let policy = policy::load(&dirs.policy_file())?.context("policy file")?;
+            assert_eq!(policy.preset, Preset::Open);
+            assert_eq!(policy.deny, [Target::parse("evil.test")?]);
+            assert_eq!(
+                policy.sandboxes["codex-api"].allow,
+                [Target::parse("pypi.org")?]
+            );
+            let (preset, entries) = read_network(&dirs);
+            assert_eq!(preset, Some(Preset::Open));
+            assert_eq!(entries, [] as [NetEntry; 0]);
+            Ok(())
+        })();
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        outcome
+    }
+
+    #[tokio::test]
+    async fn edit_policy_opens_create_after_the_first_preset() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("msbx-tui-first-{}", std::process::id()));
+        let dirs = Dirs {
+            config: root.join("config"),
+            state: root.join("state"),
+        };
+        let mut app = App::new(PathBuf::from("/work"), None, vec!["codex"], preview_name);
+        edit_policy(
+            &mut app,
+            &dirs,
+            Edit::Preset {
+                preset: Preset::Balanced,
+                then_create: true,
+            },
+        )
+        .await;
+        let first = (app.policy, app.popup.clone(), app.status_line.clone());
+        app.popup = None;
+        edit_policy(
+            &mut app,
+            &dirs,
+            Edit::Allow {
+                target: name("*.com"),
+                sandbox: None,
+            },
+        )
+        .await;
+        let second = (app.popup.clone(), app.status_line.clone());
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        assert_eq!(
+            first,
+            (
+                Some(Preset::Balanced),
+                Some(Popup::Create { agent_index: 0 }),
+                Some("network preset: balanced".to_owned())
+            )
+        );
+        assert_eq!(second.0, None, "a failed edit opens nothing");
+        assert!(
+            second
+                .1
+                .as_deref()
+                .is_some_and(|line| line.contains("*.com")),
+            "{:?}",
+            second.1
+        );
         Ok(())
     }
 

@@ -1,19 +1,20 @@
 ---
 source: src/ui.rs
+assertion_line: 816
 expression: "draw(&app, 100, 30).backend()"
 ---
 "msbx   microVM sandboxes for coding agents · microsandbox                                     ? help"
 "                                                                                                    "
 "┌────────────────────────────────┐  codex-api                                                       "
-"│ ● codex-api                    │  Overview   Logs                                                 "
+"│ ● codex-api                    │  Overview   Logs   Network                                       "
 "│ codex                 ↵ attach │  ────────────────────────────────────────────────────────────────"
 "│ ~/dev/xap/api                  │  status   running · up 12m                                       "
 "│ cpu ▮▯▯▯▯▯ 18%  mem 2.1G/32G   │  cpu      18 vCPU   ▮▮▯▯▯▯▯▯▯▯ 18%                               "
 "│ stop    exec    remove         │  memory   2.1G / 32G                                             "
-"└────────────────────────────────┘  network  public + host                                          "
-"┌────────────────────────────────┐  secrets  OPENAI_API_KEY (host-side)                             "
-"│ ■ pi-notes                     │  mounts   /home/dev/dev/xap/api -> same path                     "
-"│ pi                             │  image    node:24-bookworm-slim                                  "
+"└────────────────────────────────┘  network  policy balanced (proxied)                              "
+"┌────────────────────────────────┐  traffic  ↓ 48M  ↑ 3.1M                                          "
+"│ ■ pi-notes                     │  secrets  OPENAI_API_KEY (host-side)                             "
+"│ pi                             │  mounts   /home/dev/dev/xap/api -> same path                     "
 "│ ~/notes                 ╭ Remove sandbox ──────────────────────────────╮                          "
 "│ stopped                 │                                              │                          "
 "│ start   exec    remove  │  Remove codex-api?                           │                          "

@@ -1,11 +1,12 @@
 ---
 source: src/ui.rs
+assertion_line: 831
 expression: "draw(&app, 100, 30).backend()"
 ---
 "msbx   microVM sandboxes for coding agents · microsandbox                                     ? help"
 "                                                                                                    "
 "┌────────────────────────────────┐  codex-api                                                       "
-"│ ● codex-api                    │  Overview   Logs                                                 "
+"│ ● codex-api                    │  Overview   Logs   Network                                       "
 "│ codex                 ↵ attach │  ────────────────────────────────────────────────────────────────"
 "│ ~/dev/xap/api                  │  log line 17                                                     "
 "│ cpu ▮▯▯▯▯▯ 18%  mem 2.1G/32G   │  log line 18                                                     "

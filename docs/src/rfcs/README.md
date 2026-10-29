@@ -33,7 +33,7 @@ Each RFC starts with a short metadata list:
 | 0005 | [Detachable sessions](0005-detachable-sessions.md) | Close the terminal, the agent keeps working; reattach later | none |
 | 0006 | [Setup script](0006-setup-script.md) | `.msbx/setup.sh` installs a project's tools in its sandbox, re-run when it changes | 0002 |
 | 0007 | [Worktrees](0007-worktrees.md) | Several agents on one repo at once, each on its own branch | 0001 |
-| 0008 | [Network view](0008-network.md) | See the sandbox's network policy and traffic, and with a strict preset, what was blocked | 0002 |
+| 0008 | [Network](0008-network.md) (implemented) | Allow and deny hosts per sandbox, live, through the msbx proxy; see what was blocked | none |
 | 0009 | [Ports](0009-ports.md) | Open a dev server running in the sandbox from your browser, without restarting it | none |
 
 ```mermaid
