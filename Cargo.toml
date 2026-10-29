@@ -16,6 +16,9 @@ clap = { version = "4.6", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 microsandbox = { version = "=0.7.11", default-features = false, features = ["local", "net"] }
+# Already a dependency of microsandbox; named directly because the SDK does not re-export the
+# network-policy types (`Destination`, `DestinationGroup`) needed to summarise a policy.
+microsandbox-types = "=0.7.11"
 ratatui = "0.30"
 tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "process", "signal", "time"] }
 
