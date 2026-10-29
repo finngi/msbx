@@ -37,3 +37,4 @@
   - [0007 Worktrees](rfcs/0007-worktrees.md)
   - [0008 Network](rfcs/0008-network.md)
   - [0009 Ports](rfcs/0009-ports.md)
+  - [0010 Dashboard](rfcs/0010-dashboard.md)

@@ -44,8 +44,15 @@ msbx policy check pypi.org:443   # Allowed or Blocked and the rule; exit 1 when 
 msbx policy ls --sandbox codex-api
 ```
 
-In the dashboard, the Network tab shows the same rows for the selected sandbox. Move with
-`←`/`→`, then `a` allows the host for that sandbox, `A` everywhere, `d` denies it there.
+In the dashboard, press `Tab` to focus Detail and `[` / `]` to select Network. Rows group the
+log by sandbox, host and port. Move with `↑` / `↓`, then `Enter` expands the history. Press `a`
+to allow a blocked host for its sandbox, `A` to allow it everywhere, or `b` to block an allowed
+host there. Changes affect future connections; historical counts stay unchanged.
+
+Press `n` for traffic across all sandboxes. `/` searches, `o` cycles status and `s` cycles
+sandboxes. The Rules tab lists effective preset, global and sandbox rules. Press `a` to add a
+rule or `r` to confirm removing an explicit rule; preset rules change with `p`. New rules in
+the full view apply globally when All sandboxes is selected, or to the selected sandbox.
 
 ## Allow a blocked host from the log
 

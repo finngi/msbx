@@ -19,7 +19,7 @@ msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a sin
 ## Features
 
 - `msbx agent` starts a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
-- `msbx` opens a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, Overview, Logs and Network tabs.
+- `msbx` opens a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, Overview, Logs, Network and Rules tabs.
 - Network policy like Docker Sandboxes: `open`, `balanced` or `locked-down`, plus allow and deny rules per host (`example.com`, `*.example.com`, `**.example.com`, ports, CIDRs), global or per sandbox. Every sandbox's traffic goes through a small msbx proxy, so rule changes apply at once and a log shows what was allowed and blocked.
 - `msbx ls`, `msbx logs NAME`, `msbx run IMAGE` and any other command run `msb` with the same arguments.
 - `msbx secret set OPENAI_API_KEY` keeps the key in the macOS Keychain, so you need not export it in every shell.
@@ -121,21 +121,34 @@ Rules live in `~/.config/msbx/policy.toml` and apply to the next connection; not
 msbx
 ```
 
+The title marker shows which pane has focus. On narrow terminals, that pane fills the screen;
+`Tab` switches to the other pane.
+
 | Key | Action |
 |---|---|
-| `↑` / `↓` | Select sandbox |
-| `Tab` | Switch tab (Overview / Logs / Network) |
-| `Enter` | Attach the sandbox's agent |
-| `x` | Open a shell in the sandbox |
-| `c` | Create a sandbox |
-| `s` | Start / stop |
-| `r` | Remove (asks to confirm) |
-| `←` / `→`, `a`, `A`, `d` | Network tab: move, allow here, allow everywhere, deny |
+| `Tab` / `Shift-Tab`, `←` / `→` (`h` / `l`) | Switch between Cards and Detail |
+| `↑` / `↓` (`k` / `j`) | Move within the focused pane |
+| `[` / `]` | Change detail tab: Overview / Logs / Network / Rules |
+| `Enter` | Cards: attach or create; Network: expand the selected row |
+| `c` | Create wizard: choose agent, name and workspace |
+| `x`, `s`, `r` | Cards: shell, start/stop, remove (confirm) |
+| `n` | Full network view; `/` searches, `o` filters status, `s` filters sandbox |
+| `a`, `A`, `b` | Network: allow here, allow everywhere, block here |
+| `a`, `r` | Rules: add a rule, remove an explicit rule (confirm) |
 | `p` | Choose the network preset |
-| `?` | Help |
-| `q` | Quit |
+| `?` / `Ctrl-H` | Help for the current view |
+| `q` / `Ctrl-C` | Quit |
 
-Attaching hands the terminal to `msb exec -t`; the dashboard returns when you exit.
+The create wizard shows credential availability, lets you edit the default `<agent>-<folder>`
+name and browse workspace folders. Creation runs in the background; press `Enter` on the new
+card when it is ready to attach. Attaching gives the agent the terminal; the dashboard returns
+when you exit.
+
+Network rows show time, host, port, hits and status. Expand one for its first/last seen times
+and allowed/blocked counts. The Rules view shows preset, global and sandbox rules, and edits
+apply to the next connection. Help and footer hints come from the same keymap. Set `NO_COLOR=1`
+for a monochrome display. See [Dashboard keys](https://finngi.github.io/msbx/reference/dashboard-keys.html)
+for forms, filters and Escape behavior.
 
 ### Everything else is msb
 

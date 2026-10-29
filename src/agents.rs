@@ -25,6 +25,7 @@ pub(crate) struct Login {
 pub(crate) struct Agent {
     /// Stable identifier used in sandbox names, labels and the CLI.
     pub(crate) id: &'static str,
+    pub(crate) description: &'static str,
     /// Runs once as root inside a fresh sandbox.
     pub(crate) install: &'static str,
     pub(crate) command: &'static str,
@@ -58,6 +59,7 @@ pub(crate) fn find(id: &str) -> Option<&'static Agent> {
 
 static CODEX: Agent = Agent {
     id: "codex",
+    description: "OpenAI coding agent; API key or shared sign-in",
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
               && npm install -g @openai/codex@0.148.0",
     command: "codex",
@@ -75,6 +77,7 @@ static CODEX: Agent = Agent {
 
 static PI: Agent = Agent {
     id: "pi",
+    description: "Coding agent for local models and shared sign-in",
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
               && npm install -g @earendil-works/pi-coding-agent@1.4.0",
     command: "pi",
@@ -90,6 +93,7 @@ static PI: Agent = Agent {
 
 static SHELL: Agent = Agent {
     id: "shell",
+    description: "Bash with git and curl; no credentials needed",
     install: "apt-get update && apt-get install -y --no-install-recommends ca-certificates git curl",
     command: "bash",
     secrets: &[],

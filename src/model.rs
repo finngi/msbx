@@ -47,6 +47,66 @@ pub(crate) struct NetEntry {
     pub(crate) port: u16,
     pub(crate) allowed: bool,
     pub(crate) count: u64,
-    /// Local `HH:MM:SS`.
+    pub(crate) allowed_count: u64,
+    pub(crate) blocked_count: u64,
+    /// Local date and time, formatted in IO.
+    pub(crate) first_seen: String,
     pub(crate) last_seen: String,
+}
+
+/// An owned effective rule. `sandbox` identifies its editable scope, not the current filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuleInfo {
+    pub(crate) target: String,
+    pub(crate) source: crate::policy::Source,
+    pub(crate) sandbox: Option<String>,
+    pub(crate) allowed: bool,
+}
+
+/// The canonical msbx spelling also produced by `sandbox::sandbox_name`.
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 128 {
+        return Err("name must contain 1 to 128 characters".to_owned());
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err("use lowercase letters, digits and single interior hyphens".to_owned());
+    }
+    if name.starts_with('-') || name.ends_with('-') || name.contains("--") {
+        return Err("hyphens must be single and between letters or digits".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_names_accept_generated_shapes_and_the_byte_limit() {
+        for value in ["codex-api", "pi", "shell-project-2", "9", &"a".repeat(128)] {
+            assert!(validate_name(value).is_ok(), "{value}");
+        }
+    }
+
+    #[test]
+    fn canonical_names_reject_noncanonical_or_incomplete_input() {
+        for value in [
+            "",
+            "-api",
+            "api-",
+            "api--two",
+            "API",
+            "api.dev",
+            "api_dev",
+            "two words",
+            "café",
+            "../api",
+            &"a".repeat(129),
+        ] {
+            assert!(validate_name(value).is_err(), "{value:?}");
+        }
+    }
 }

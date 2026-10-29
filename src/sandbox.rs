@@ -15,7 +15,7 @@ use microsandbox::{
 use microsandbox_types::{Action, Destination, DestinationGroup, Direction, NetworkSpec};
 
 use crate::agents::{self, Agent, Login};
-use crate::model::{SandboxInfo, Status};
+use crate::model::{SandboxInfo, Status, validate_name};
 use crate::{models, proxy};
 
 /// Where progress and notes from setting up a sandbox go: stderr for the CLI, the status line
@@ -105,16 +105,43 @@ fn sanitise(folder: &str) -> String {
     out.trim_matches('-').to_owned()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExistingMode {
+    CreateOnly,
+    Reuse,
+}
+
 /// Connects to (or creates and boots) the agent's sandbox for `project`, installs the agent on
 /// first use, and returns the sandbox name. The VM keeps running after this returns.
 ///
 /// `project` must be absolute; it is mounted and used as the working directory at the same path.
 pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) -> Result<String> {
     let name = sandbox_name(agent, project);
+    ensure_with_mode(agent, project, &name, ExistingMode::Reuse, notify).await
+}
+
+/// Creates the dashboard's custom name, failing if another creator claims it first.
+pub(crate) async fn ensure_named(
+    agent: &Agent,
+    project: &Path,
+    name: &str,
+    notify: Notify<'_>,
+) -> Result<String> {
+    ensure_with_mode(agent, project, name, ExistingMode::CreateOnly, notify).await
+}
+
+async fn ensure_with_mode(
+    agent: &Agent,
+    project: &Path,
+    name: &str,
+    mode: ExistingMode,
+    notify: Notify<'_>,
+) -> Result<String> {
+    validate_name(name).map_err(anyhow::Error::msg)?;
     let project_path = project
         .to_str()
         .with_context(|| format!("project path {} is not valid UTF-8", project.display()))?;
-    check_existing(&name, project_path).await?;
+    check_existing(mode, name, agent.id, project_path).await?;
     let login_volume = login_volume(agent);
     if let Some(volume) = &login_volume {
         ensure_login_volume(volume, agent.id).await?;
@@ -128,7 +155,7 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) ->
              (export it, or store it with `msbx secret set {var}`)"
         ));
     }
-    let mut builder = Sandbox::builder(&name)
+    let mut builder = Sandbox::builder(name)
         .image(agents::IMAGE)
         .cpus(host_cpus())
         .memory(MEMORY_MIB)
@@ -143,7 +170,7 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) ->
         .proxy(|proxy| {
             proxy
                 .http_connect(proxy::ADDRESS)
-                .credentials(&name, SecretSource::env(proxy::TOKEN_VAR))
+                .credentials(name, SecretSource::env(proxy::TOKEN_VAR))
         })
         .detached(true);
     if let Some(volume) = &login_volume {
@@ -162,15 +189,18 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) ->
                 .allow(secret.host)
         });
     }
-    let sandbox = builder
-        .connect_or_create()
-        .await
-        .with_context(|| format!("starting sandbox {name}"))?;
+    // `connect_or_create` starts a concurrent winner with its persisted config. Dashboard
+    // creation must instead fail atomically if the name was claimed after our early check.
+    let sandbox = match mode {
+        ExistingMode::CreateOnly => builder.create().await,
+        ExistingMode::Reuse => builder.connect_or_create().await,
+    }
+    .with_context(|| format!("starting sandbox {name}"))?;
 
-    let prepared = prepare(&sandbox, agent, &name, notify).await;
+    let prepared = prepare(&sandbox, agent, name, notify).await;
     // A detached sandbox's handle never owns the VM, so releasing it leaves the VM running.
     sandbox.detach().await;
-    prepared.map(|()| name)
+    prepared.map(|()| name.to_owned())
 }
 
 /// The static policy of a proxied sandbox: deny by default, DNS and the local model ports on the
@@ -216,6 +246,25 @@ pub(crate) fn login_volume(agent: &Agent) -> Option<String> {
         .login
         .as_ref()
         .map(|_| format!("{LOGIN_VOLUME_PREFIX}{}", agent.id))
+}
+
+/// Checks for a shared sign-in without creating a volume or reading credential contents.
+pub(crate) async fn shared_login(agent: &Agent) -> Result<Option<bool>> {
+    let Some(login) = &agent.login else {
+        return Ok(None);
+    };
+    let volume = login_volume(agent).context("agent login volume name")?;
+    let handle = match Volume::get(&volume).await {
+        Ok(handle) => handle,
+        Err(MicrosandboxError::VolumeNotFound(_)) => return Ok(Some(false)),
+        Err(error) => return Err(error).with_context(|| format!("looking up volume {volume}")),
+    };
+    handle
+        .fs()
+        .exists(login.file)
+        .await
+        .map(Some)
+        .with_context(|| format!("checking shared login in {volume}"))
 }
 
 /// Creates the login volume unless it exists. Another msbx creating it at the same time is
@@ -362,7 +411,7 @@ fn models_script(guest_path: &str) -> String {
 
 /// Two folders with the same name map to the same sandbox; refuse to hand one project's
 /// sandbox (and its mount) to another.
-async fn check_existing(name: &str, project: &str) -> Result<()> {
+async fn check_existing(mode: ExistingMode, name: &str, agent: &str, project: &str) -> Result<()> {
     let handle = match Sandbox::get(name).await {
         Ok(handle) => handle,
         Err(MicrosandboxError::SandboxNotFound(_)) => return Ok(()),
@@ -371,8 +420,34 @@ async fn check_existing(name: &str, project: &str) -> Result<()> {
     let config = handle
         .config()
         .with_context(|| format!("reading config of sandbox {name}"))?;
-    match config.spec.labels.get(LABEL_PROJECT) {
-        Some(existing) if existing == project => Ok(()),
+    check_identity(
+        mode,
+        name,
+        agent,
+        project,
+        config.spec.labels.get(LABEL_AGENT).map(String::as_str),
+        config.spec.labels.get(LABEL_PROJECT).map(String::as_str),
+    )
+}
+
+fn check_identity(
+    mode: ExistingMode,
+    name: &str,
+    agent: &str,
+    project: &str,
+    existing_agent: Option<&str>,
+    existing_project: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(
+        mode == ExistingMode::Reuse,
+        "sandbox {name} already exists; choose another name"
+    );
+    match existing_project {
+        Some(existing) if existing == project && existing_agent == Some(agent) => Ok(()),
+        Some(existing) if existing == project => bail!(
+            "sandbox {name} belongs to agent {}; choose another name",
+            existing_agent.unwrap_or("unknown")
+        ),
         Some(existing) => bail!(
             "sandbox {name} already exists for {existing}; remove it with `msb rm -f {name}` \
              or run msbx from that folder"
@@ -636,6 +711,61 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_create_rejects_even_a_matching_existing_name() {
+        assert!(
+            check_identity(
+                ExistingMode::CreateOnly,
+                "chosen",
+                "codex",
+                "/work",
+                Some("codex"),
+                Some("/work"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn custom_names_cannot_reuse_another_agent_or_project() {
+        assert!(
+            check_identity(
+                ExistingMode::Reuse,
+                "chosen",
+                "codex",
+                "/work",
+                Some("codex"),
+                Some("/work")
+            )
+            .is_ok()
+        );
+        assert!(
+            check_identity(
+                ExistingMode::Reuse,
+                "chosen",
+                "codex",
+                "/work",
+                Some("pi"),
+                Some("/work")
+            )
+            .is_err()
+        );
+        assert!(
+            check_identity(
+                ExistingMode::Reuse,
+                "chosen",
+                "codex",
+                "/work",
+                Some("codex"),
+                Some("/other")
+            )
+            .is_err()
+        );
+        assert!(
+            check_identity(ExistingMode::Reuse, "chosen", "codex", "/work", None, None).is_err()
+        );
+    }
+
+    #[test]
     fn names_are_lowercased_and_sanitised() {
         assert_eq!(name_for("sandbox-test"), "shell-sandbox-test");
         assert_eq!(name_for("My Project"), "shell-my-project");
@@ -667,6 +797,7 @@ mod tests {
     fn generated_names_pass_sdk_validation() {
         for folder in ["x", "My Project", "日本語", "..", &"z".repeat(500)] {
             let name = name_for(folder);
+            assert!(validate_name(&name).is_ok(), "{name:?}");
             microsandbox::validate_sandbox_name(&name)
                 .unwrap_or_else(|error| panic!("{name:?}: {error}"));
         }
@@ -799,6 +930,7 @@ mod tests {
 
     static SECRET_AGENT: Agent = Agent {
         id: "secret",
+        description: "test agent",
         install: "true",
         command: "true",
         secrets: &[agents::Secret {
@@ -811,6 +943,7 @@ mod tests {
 
     static LOGIN_AGENT: Agent = Agent {
         id: "logintest",
+        description: "test agent",
         install: "true",
         command: "true",
         secrets: &[],
@@ -1047,6 +1180,7 @@ mod tests {
     /// An agent whose install is a no-op; the image's `node` makes the HTTPS requests.
     static NET_AGENT: Agent = Agent {
         id: "nettest",
+        description: "test agent",
         install: "true",
         command: "true",
         secrets: &[],
