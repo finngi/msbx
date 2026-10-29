@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: microsandbox runtime or VM bug
+    url: https://github.com/superradcompany/microsandbox/issues
+    about: Problems that also happen with `msb` alone (VM boot, mounts, networking, secrets).
+  - name: Security vulnerability
+    url: https://github.com/finngi/msbx/security/advisories/new
+    about: Report privately. Do not open a public issue.

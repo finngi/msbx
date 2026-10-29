@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a change to the msbx TUI or `msbx run`.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        msbx only adds what microsandbox's `msb` CLI lacks. Features for the runtime, the SDK or `msb` commands belong in [microsandbox](https://github.com/superradcompany/microsandbox/issues).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should msbx behave? Keys, commands or screens if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including whether `msb` can already do this.
