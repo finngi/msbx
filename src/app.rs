@@ -213,6 +213,8 @@ pub(crate) struct App {
     pub(crate) network_row: usize,
     pub(crate) rules: Vec<RuleInfo>,
     pub(crate) rule_row: usize,
+    /// A rule just added from the Rules tab; selected once the reloaded rules list has it.
+    pub(crate) pending_rule: Option<(String, Option<String>)>,
     pub(crate) credentials: Vec<String>,
     pub(crate) no_color: bool,
     pub(crate) full_network: bool,
@@ -252,6 +254,7 @@ impl App {
             network_row: 0,
             rules: Vec::new(),
             rule_row: 0,
+            pending_rule: None,
             credentials: Vec::new(),
             no_color: false,
             full_network: false,
@@ -421,7 +424,15 @@ impl App {
     pub(crate) fn set_rules(&mut self, rules: Vec<RuleInfo>) {
         let previous = self.rule_rows().get(self.rule_row).copied().cloned();
         self.rules = rules;
-        if let Some(previous) = previous {
+        if let Some((target, sandbox)) = self.pending_rule.clone()
+            && let Some(index) = self
+                .rule_rows()
+                .iter()
+                .position(|rule| rule.target == target && rule.sandbox == sandbox)
+        {
+            self.pending_rule = None;
+            self.rule_row = index;
+        } else if let Some(previous) = previous {
             self.rule_row = self
                 .rule_rows()
                 .iter()
@@ -919,6 +930,7 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => allowed = !allowed,
             KeyCode::Enter => match Target::parse(target.text()) {
                 Ok(target) => {
+                    self.pending_rule = Some((target.to_string(), sandbox.clone()));
                     return Some(if allowed {
                         Action::Allow {
                             target: target.to_string(),
@@ -1787,6 +1799,39 @@ mod tests {
             app.status_line
                 .as_deref()
                 .is_some_and(|text| text.contains("read-only"))
+        );
+    }
+
+    #[test]
+    fn an_added_rule_is_selected_once_the_rules_reload() {
+        let mut app = app();
+        app.focus = Focus::Detail;
+        app.tab = Tab::Rules;
+        let preset = RuleInfo {
+            target: name("pypi.org"),
+            source: Source::Preset,
+            sandbox: None,
+            allowed: true,
+        };
+        app.set_rules(vec![preset.clone()]);
+        press(&mut app, KeyCode::Char('a'));
+        app.update_paste("example.com");
+        assert!(press(&mut app, KeyCode::Enter).is_some());
+        let added = RuleInfo {
+            target: name("example.com"),
+            source: Source::Sandbox,
+            sandbox: Some(name("a")),
+            allowed: true,
+        };
+        app.set_rules(vec![added.clone(), preset.clone()]);
+        assert_eq!(app.rule_rows().get(app.rule_row), Some(&&added));
+        assert_eq!(app.pending_rule, None, "used once");
+        app.rule_row = 1;
+        app.set_rules(vec![added, preset.clone()]);
+        assert_eq!(
+            app.rule_rows().get(app.rule_row),
+            Some(&&preset),
+            "later reloads keep the cursor"
         );
     }
 

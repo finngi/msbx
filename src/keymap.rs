@@ -220,11 +220,30 @@ pub(crate) fn command(app: &App, key: KeyEvent) -> Option<Command> {
         .map(|binding| binding.command)
 }
 
+/// Footer hint standing in for the split view's movement keys, which help lists one by one.
+const NAVIGATE: (&str, &str) = ("↑↓←→/Tab", "navigate");
+/// Footer hint standing in for `[` and `]`.
+const TABS: (&str, &str) = ("[ ]", "tabs");
+
 pub(crate) fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     let main = app.popup.is_none() && !app.searching;
+    let split = main && !app.full_network;
     let mut bindings: Vec<_> = BINDINGS
         .iter()
         .filter(|binding| active(binding.scope, app, main) && !binding.control)
+        .filter(|binding| {
+            !(split
+                && matches!(
+                    binding.command,
+                    Command::FocusNext
+                        | Command::FocusCards
+                        | Command::FocusDetail
+                        | Command::Previous
+                        | Command::Next
+                        | Command::PreviousTab
+                        | Command::NextTab
+                ))
+        })
         .collect();
     bindings.sort_by_key(|binding| match binding.command {
         Command::Help | Command::FocusNext | Command::Search => 0,
@@ -238,10 +257,14 @@ pub(crate) fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         Command::Create | Command::Remove | Command::PageUp | Command::PageDown => 2,
         _ => 3,
     });
-    bindings
+    let hints = bindings
         .into_iter()
-        .map(|binding| (binding.key, binding.hint))
-        .collect()
+        .map(|binding| (binding.key, binding.hint));
+    if split {
+        [NAVIGATE, TABS].into_iter().chain(hints).collect()
+    } else {
+        hints.collect()
+    }
 }
 
 pub(crate) fn help(app: &App) -> Vec<(&'static str, &'static str)> {

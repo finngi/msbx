@@ -1,12 +1,12 @@
 ---
 source: src/ui.rs
-assertion_line: 1530
+assertion_line: 1551
 expression: "screens.join(\"\\n\")"
 ---
 100x30
 "msbx   microVM sandboxes for coding agents                                                    ? help"
 "                                                                                                    "
-"┌   Cards · Tab Detail ──────────┐  ┌ > Detail · Tab Cards ────────────────────────────────────────┐"
+"┌   Sandboxes ───────────────────┐  ┌ > Details ───────────────────────────────────────────────────┐"
 "│┌──────────────────────────────┐│  │codex-api                                                     │"
 "││ ▸ ● codex-api                ││  │ Overview   Logs   Network  [Rules]  [/] tabs                 │"
 "││ codex                        ││  │                                                              │"
@@ -38,7 +38,7 @@ expression: "screens.join(\"\\n\")"
 80x24
 "msbx   microVM sandboxes for coding agents                                ? help"
 "                                                                                "
-"┌ > Detail · Tab Cards ────────────────────────────────────────────────────────┐"
+"┌ > Details ───────────────────────────────────────────────────────────────────┐"
 "│codex-api                                                                     │"
 "│ Overview   Logs   Network  [Rules]  [/] tabs                                 │"
 "│                                                                              │"
@@ -64,7 +64,7 @@ expression: "screens.join(\"\\n\")"
 60x20
 "msbx   microVM sandboxes for coding agents            ? help"
 "                                                            "
-"┌ > Detail · Tab Cards ────────────────────────────────────┐"
+"┌ > Details ───────────────────────────────────────────────┐"
 "│codex-api                                                 │"
 "│ Overview   Logs   Network  [Rules]  [/] tabs             │"
 "│                                                          │"

@@ -1,12 +1,12 @@
 ---
 source: src/ui.rs
-assertion_line: 1530
+assertion_line: 1551
 expression: "screens.join(\"\\n\")"
 ---
 100x30
 "msbx   microVM sandboxes for coding agents                                                    ? help"
 "                                                                                                    "
-"┌ > Cards · Tab Detail ──────────┐  ┌   Detail · Tab Cards ────────────────────────────────────────┐"
+"┌ > Sandboxes ───────────────────┐  ┌   Details ───────────────────────────────────────────────────┐"
 "│┌──────────────────────────────┐│  │codex-api                                                     │"
 "││ ▸ ● codex-api                ││  │[Overview]  Logs   Network   Rules   [/] tabs                 │"
 "││ codex               ↵ attach ││  │                                                              │"
@@ -38,7 +38,7 @@ expression: "screens.join(\"\\n\")"
 80x24
 "msbx   microVM sandboxes for coding agents                                ? help"
 "                                                                                "
-"┌ > Cards · Tab Detail ────────────────────────────────────────────────────────┐"
+"┌ > Sandboxes ─────────────────────────────────────────────────────────────────┐"
 "│┌────────────────────────────────────────────────────────────────────────────┐│"
 "││ ▸ ● codex-api                                                              ││"
 "│╭ Network policy ────────────────────────────────────────────────────────────╮│"
@@ -64,7 +64,7 @@ expression: "screens.join(\"\\n\")"
 60x20
 "msbx   microVM sandboxes for coding agents            ? help"
 "                                                            "
-"┌ > Cards · Tab Detail ────────────────────────────────────┐"
+"┌ > Sandboxes ─────────────────────────────────────────────┐"
 "╭ Network policy ──────────────────────────────────────────╮"
 "│ Choose once for all sandboxes; p changes it later.       │"
 "│                                                          │"

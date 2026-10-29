@@ -205,7 +205,7 @@ fn pane(title: &str, focused: bool) -> Block<'static> {
 }
 
 fn render_cards(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane("Cards · Tab Detail", app.focus == Focus::Cards);
+    let block = pane("Sandboxes", app.focus == Focus::Cards);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let mut y = inner.y;
@@ -303,16 +303,16 @@ fn render_new_card(frame: &mut Frame, selected: bool, area: Rect) {
 }
 
 fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
-    let block = pane("Detail · Tab Cards", app.focus == Focus::Detail);
+    let block = pane("Details", app.focus == Focus::Detail);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(sandbox) = app.selected_sandbox() else {
-        frame.render_widget(
-            Paragraph::new("No sandbox selected.\nPress c to create one, or Tab to choose a card.")
-                .wrap(Wrap { trim: false })
-                .dim(),
-            inner,
-        );
+        let hint = if app.sandboxes.is_empty() {
+            "No sandboxes yet.\nPress c to create one."
+        } else {
+            "Press Enter or c to create a sandbox,\nor ↑ to choose one."
+        };
+        frame.render_widget(Paragraph::new(hint).wrap(Wrap { trim: false }).dim(), inner);
         return;
     };
     let [title, tabs, _, content] = pane_regions(inner);
@@ -2059,10 +2059,10 @@ mod tests {
         let mut app = populated();
         for (width, height) in [(80, 24), (60, 20)] {
             let cards = draw(&app, width, height)?.backend().to_string();
-            assert!(cards.contains("> Cards"), "{cards}");
+            assert!(cards.contains("> Sandboxes"), "{cards}");
             press(&mut app, crossterm::event::KeyCode::Right);
             let detail = draw(&app, width, height)?.backend().to_string();
-            assert!(detail.contains("> Detail"), "{detail}");
+            assert!(detail.contains("> Details"), "{detail}");
             press(&mut app, crossterm::event::KeyCode::Left);
         }
         Ok(())

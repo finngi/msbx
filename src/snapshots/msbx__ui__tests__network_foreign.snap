@@ -1,12 +1,12 @@
 ---
 source: src/ui.rs
-assertion_line: 1530
+assertion_line: 1551
 expression: "screens.join(\"\\n\")"
 ---
 100x30
 "msbx   microVM sandboxes for coding agents                                                    ? help"
 "                                                                                                    "
-"┌   Cards · Tab Detail ──────────┐  ┌ > Detail · Tab Cards ────────────────────────────────────────┐"
+"┌   Sandboxes ───────────────────┐  ┌ > Details ───────────────────────────────────────────────────┐"
 "│┌──────────────────────────────┐│  │scratch                                                       │"
 "││ ● codex-api                  ││  │ Overview   Logs  [Network]  Rules   [/] tabs                 │"
 "││ codex                        ││  │                                                              │"
@@ -33,12 +33,12 @@ expression: "screens.join(\"\\n\")"
 "│└╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘│  │                                                              │"
 "│                                │  │                                                              │"
 "└────────────────────────────────┘  └──────────────────────────────────────────────────────────────┘"
-"Tab/⇧Tab panel  Enter details  a allow  b block  c create  q quit  ←/h cards  →/l detail      ? help"
+"↑↓←→/Tab navigate  [ ] tabs  Enter details  a allow  b block  c create  q quit  n network     ? help"
 
 80x24
 "msbx   microVM sandboxes for coding agents                                ? help"
 "                                                                                "
-"┌ > Detail · Tab Cards ────────────────────────────────────────────────────────┐"
+"┌ > Details ───────────────────────────────────────────────────────────────────┐"
 "│scratch                                                                       │"
 "│ Overview   Logs  [Network]  Rules   [/] tabs                                 │"
 "│                                                                              │"
@@ -59,12 +59,12 @@ expression: "screens.join(\"\\n\")"
 "│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
-"Tab/⇧Tab panel  Enter details  a allow  b block  c create  q quit         ? help"
+"↑↓←→/Tab navigate  [ ] tabs  Enter details  a allow  b block  c create    ? help"
 
 60x20
 "msbx   microVM sandboxes for coding agents            ? help"
 "                                                            "
-"┌ > Detail · Tab Cards ────────────────────────────────────┐"
+"┌ > Details ───────────────────────────────────────────────┐"
 "│scratch                                                   │"
 "│ Overview   Logs  [Network]  Rules   [/] tabs             │"
 "│                                                          │"
@@ -81,4 +81,4 @@ expression: "screens.join(\"\\n\")"
 "│                                                          │"
 "│                                                          │"
 "└──────────────────────────────────────────────────────────┘"
-"Tab/⇧Tab panel  Enter details  a allow  b block       ? help"
+"↑↓←→/Tab navigate  [ ] tabs  Enter details            ? help"

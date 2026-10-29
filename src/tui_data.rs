@@ -83,7 +83,8 @@ pub(crate) fn aggregate_network(entries: &[Entry]) -> Vec<NetEntry> {
     rows.into_iter().map(|(_, entry)| entry).collect()
 }
 
-/// Shared rules appear once; sandbox rows retain the scope needed for later edits.
+/// Shared rules appear once; sandbox rows retain the scope needed for later edits. Most specific
+/// first, like `msbx policy ls`: sandbox rules, then global, then the preset baseline.
 pub(crate) fn rule_rows(policy: &Policy) -> Vec<RuleInfo> {
     let shared = policy.rules(None).into_iter().map(|rule| RuleInfo {
         target: rule.target.to_string(),
@@ -103,7 +104,7 @@ pub(crate) fn rule_rows(policy: &Policy) -> Vec<RuleInfo> {
                 allowed: rule.verdict == Verdict::Allow,
             })
     });
-    shared.chain(scoped).collect()
+    scoped.chain(shared).collect()
 }
 
 /// Only the immediate directories are needed. Fixture navigation cannot leave its workspace.
@@ -188,6 +189,25 @@ fn credential_summary(agent: &Agent, api_key: bool, login: Result<Option<bool>>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_rows_list_sandbox_then_global_then_preset() -> Result<()> {
+        let mut policy = Policy::new(Preset::Balanced);
+        policy.allow(&[policy::Target::parse("cdn.example.com")?], None);
+        policy.allow(&[policy::Target::parse("example.com")?], Some("codex-api"));
+        let sources: Vec<_> = rule_rows(&policy).iter().map(|rule| rule.source).collect();
+        let first_preset = sources
+            .iter()
+            .position(|source| *source == Source::Preset)
+            .context("the balanced preset has rules")?;
+        assert_eq!(&sources[..2], [Source::Sandbox, Source::Global]);
+        assert!(
+            sources[first_preset..]
+                .iter()
+                .all(|source| *source == Source::Preset)
+        );
+        Ok(())
+    }
 
     #[test]
     fn credentials_distinguish_availability_missing_unknown_and_none() {
