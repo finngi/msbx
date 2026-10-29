@@ -1,9 +1,8 @@
 # RFCs
 
-RFCs ("requests for comments") are design proposals for changes to msbx that are larger than a
-small fix: new commands, new defaults, or anything that changes the
-[security model](../explanation/security-model.md). Nothing described in an RFC exists until it
-is implemented and released; the other sections of these docs describe what msbx does today.
+Here are the plans for msbx's next features. Each feature has its own page and tracking issue. These are all proposals. Feel free to comment on the issues before or during the work.
+
+msbx stays a thin layer on top of microsandbox. A feature goes in msbx only if `msb` doesn't already do it, and any unknown command is still passed straight to `msb`.
 
 ## Process
 
@@ -23,16 +22,39 @@ Each RFC starts with a short metadata list:
 - Tracking issue: #N
 ```
 
-## Index
+## Order
 
-| RFC | Title | Status |
-|---|---|---|
-| 0001 | [Git safety](0001-git-safety.md) | Proposed |
-| 0002 | [Config](0002-config.md) | Proposed |
-| 0003 | [GitHub access](0003-github-access.md) | Proposed |
-| 0004 | [Shared logins](0004-shared-logins.md) | Proposed |
-| 0005 | [Detachable sessions](0005-detachable-sessions.md) | Proposed |
-| 0006 | [Setup script](0006-setup-script.md) | Proposed |
-| 0007 | [Worktrees](0007-worktrees.md) | Proposed |
-| 0008 | [Network](0008-network.md) | Proposed |
-| 0009 | [Ports](0009-ports.md) | Proposed |
+| RFC | Feature | What you get | Depends on |
+|---|---|---|---|
+| 0001 | [Git safety](0001-git-safety.md) | An agent can't use your repo's `.git` to run code on your Mac without you noticing | none |
+| 0002 | [Config file](0002-config.md) | One `~/.config/msbx/config.toml` for defaults and per-project settings | none |
+| 0003 | [GitHub access](0003-github-access.md) | Agents can `git push` and `pull` with a repo-scoped token that never enters the VM | 0002 |
+| 0004 | [Shared logins](0004-shared-logins.md) | Sign in to Codex or pi once, reuse it in every project | 0002 |
+| 0005 | [Detachable sessions](0005-detachable-sessions.md) | Close the terminal, the agent keeps working; reattach later | none |
+| 0006 | [Setup script](0006-setup-script.md) | `.msbx/setup.sh` installs a project's tools in its sandbox, re-run when it changes | 0002 |
+| 0007 | [Worktrees](0007-worktrees.md) | Several agents on one repo at once, each on its own branch | 0001 |
+| 0008 | [Network view](0008-network.md) | See the sandbox's network policy and traffic, and with a strict preset, what was blocked | 0002 |
+| 0009 | [Ports](0009-ports.md) | Open a dev server running in the sandbox from your browser, without restarting it | none |
+
+```mermaid
+graph LR
+  G[0001 Git safety] --> W[0007 Worktrees]
+  C[0002 Config file] --> GH[0003 GitHub access]
+  C --> L[0004 Shared logins]
+  C --> S[0006 Setup script]
+  C --> N[0008 Network view]
+  D[0005 Detachable sessions]
+  P[0009 Ports]
+```
+
+## Decisions so far
+
+- **Config lives in your home folder only.** There is no per-repo config file, because an agent can write to the project folder and could change its own settings.
+- **Secrets are never stored.** Config names environment variables. microsandbox reads the value when a sandbox starts and swaps it in on the way out, so the VM only sees a placeholder.
+- **Logins are shared per agent by default.** You can switch to per project, or off, for repos you don't trust.
+- **Agent sessions attach through the microsandbox SDK** while the dashboard is suspended. This gives a clean redraw on reattach and frees the session straight away when a terminal closes.
+- **Ports are forwarded live while msbx is open.** This uses a lower-level microsandbox API, which is fine because msbx pins an exact microsandbox version.
+
+## What we checked
+
+Every page is based on reading the microsandbox 0.7.11 source (not only its docs) and studying the other open-source tools built on microsandbox. Where microsandbox can't do something yet (say, logging allowed connections, or changing a running sandbox's network policy), the page says so instead of hacking around it.
