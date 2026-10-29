@@ -55,6 +55,26 @@ cargo insta review
 
 Commit the updated `.snap` files with your change.
 
+## Docs
+
+The documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) in `docs/`, published to <https://finngi.github.io/msbx/> from `main`. Install the versions CI uses, then serve it with live reload:
+
+```sh
+cargo install --locked mdbook --version 0.5.0
+cargo install --locked mdbook-mermaid --version 0.17.1
+mdbook-mermaid install docs   # once: writes the git-ignored mermaid JS files
+mdbook serve docs --open
+```
+
+Pages live in `docs/src/` and must be listed in `docs/src/SUMMARY.md`. They follow [Diátaxis](https://diataxis.fr/), so put each page in one category:
+
+- `tutorials/`: lessons for a first-time user.
+- `how-to/`: steps for one specific goal.
+- `reference/`: exact descriptions of commands, keys and defaults.
+- `explanation/`: background and reasoning, such as the security model.
+
+Document only what the code does today. Proposals go in an RFC: copy `docs/src/rfcs/0000-template.md` to the next free number, add it to `SUMMARY.md`, and open a pull request with the RFC alone. Discussion happens on that pull request; implementation follows once it is accepted. Use ```` ```mermaid ```` fences for diagrams.
+
 ## Commits and pull requests
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/): `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`. Imperative subject, 72 characters or fewer.

@@ -1,0 +1,21 @@
+[book]
+title = "msbx — microsandbox extended"
+description = "A terminal dashboard and one-command agent launcher for microsandbox microVMs."
+authors = ["msbx contributors"]
+language = "en"
+src = "src"
+
+[build]
+# Fail instead of creating empty pages for files listed in SUMMARY.md but missing.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/finngi/msbx"
+edit-url-template = "https://github.com/finngi/msbx/edit/main/docs/{path}"
+# The site is served from https://finngi.github.io/msbx/; needed for the 404 page's links.
+site-url = "/msbx/"
+# Written by `mdbook-mermaid install docs`; git-ignored so they always match the pinned version.
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
