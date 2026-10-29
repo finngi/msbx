@@ -109,10 +109,10 @@ When the terminal closes, msbx sees the hangup signal and detaches before it exi
 
 ## Prior art
 
-- [tmux](https://man7.org/linux/man-pages/man1/tmux.1.html): a server process owns the sessions; clients attach and detach. `attach -d` takes over from other clients, and `-r` attaches read-only. We take the session that outlives its terminal, and the read-only watcher. We cannot copy takeover, because the runtime has no way to do it.
+- [tmux](https://man7.org/linux/man-pages/man1/tmux.1.html): a server process owns the sessions; clients attach and detach. `attach -d` takes over from other clients, and `-r` attaches read-only. We take the session that outlives its terminal, and the read-only watcher. Takeover would need runtime support that microsandbox doesn't have.
 - [docker attach](https://docs.docker.com/reference/cli/docker/container/attach/): detaches with Ctrl-P Ctrl-Q, configurable with `--detach-keys`, several clients at once, no history replay. We take the "one key to detach, the process keeps running" model.
 - [inoio/agents-sandbox](https://inoio.github.io/agents-sandbox/how-it-works.html) (GPL-3.0, ideas only, no code): runs an agent server inside the VM that several clients can attach to. This confirms that users want to come back to a running agent, but it depends on agents having a client/server mode, which ours lack.
-- [billroy/hoosegow](https://github.com/billroy/hoosegow) (MIT): its server owns the PTYs, and on reconnect it lists them, rejoins them and replays limited scrollback. We take "find the running session and rejoin it". We do not replay scrollback yet.
+- [billroy/hoosegow](https://github.com/billroy/hoosegow) (MIT): its server owns the PTYs, and on reconnect it lists them, rejoins them and replays limited scrollback. We take "find the running session and rejoin it". Scrollback replay can come later.
 
 ## Unresolved questions
 

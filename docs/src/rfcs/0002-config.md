@@ -122,7 +122,7 @@ The costs and trade-offs of this design are covered under [Rationale and alterna
 - TOML: what Rust tools and their users expect (Cargo, uv, rustfmt). It allows comments, and serde gives typed parsing with line and column errors. JSON has no comments, YAML has surprising implicit typing, and a custom format would need its own docs and parser.
 - No `msbx config` command: msbx passes unknown commands to msb, so a `config` command would shadow a future msb command of the same name, and editing a small file needs no command.
 - No environment variable layer: command-line flags already override the file. A parallel `MSBX_*` variable for every key doubles what we must document and test. The exception is variables that name secrets, which are references by design.
-- XDG path on macOS too (`~/.config`), not `~/Library/Application Support`: matches git, gh and uv, and gives users one path to remember. It is a five-line lookup, so no extra crate is needed.
+- XDG path on macOS too (`~/.config`). git, gh and uv all use it there, even though Apple's own convention is `~/Library/Application Support`. It gives users one path to remember. It is a five-line lookup, so no extra crate is needed.
 - Doing nothing: each feature would grow its own flags or environment variables, and users would retype them on every launch.
 
 ## Prior art
