@@ -374,14 +374,24 @@ fn network_tab(app: &App, sandbox: &SandboxInfo, height: u16) -> Vec<Line<'stati
     }
     header.push(" · ".dim());
     header.push(format!("{blocked} blocked").into());
-    let mut lines = vec![Line::from(header), Line::default()];
     if !sandbox.proxied {
-        lines.push(Line::from(
-            "created before network policy; recreate with".dim(),
-        ));
-        lines.push(Line::from(format!("msb rm -f {}", sandbox.name)));
+        // The proxy never sees this sandbox's traffic, so neither the policy nor the counts
+        // above apply to it.
+        let (why, fix) = match sandbox.agent {
+            Some(_) => (
+                "created before network policy; recreate with",
+                Some(format!("msb rm -f {}", sandbox.name)),
+            ),
+            None => (
+                "not created by msbx, so the msbx proxy",
+                Some("does not see its traffic".to_owned()),
+            ),
+        };
+        let mut lines = vec![Line::from(why.dim())];
+        lines.extend(fix.map(Line::from));
         return lines;
     }
+    let mut lines = vec![Line::from(header), Line::default()];
     if rows.is_empty() {
         lines.push(Line::from("No connections yet".dim()));
         return lines;
@@ -853,6 +863,16 @@ mod tests {
         let mut app = populated();
         app.tab = Tab::Network;
         app.selected = 2;
+        app.sandboxes[2].agent = Some("shell".to_owned());
+        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+    }
+
+    #[test]
+    fn snapshot_network_tab_foreign_sandbox() {
+        let mut app = populated();
+        app.tab = Tab::Network;
+        app.selected = 2;
+        app.sandboxes[2].agent = None;
         insta::assert_snapshot!(draw(&app, 100, 30).backend());
     }
 

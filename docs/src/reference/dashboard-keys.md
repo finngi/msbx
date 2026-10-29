@@ -43,14 +43,16 @@ before network policy shows `created before network policy; recreate with msb rm
 
 ## Create popup
 
-Creates the selected agent's sandbox for the folder you started `msbx` in, then attaches, like
-`msbx agent <agent>`.
+Creates the selected agent's sandbox for the folder you started `msbx` in, like
+`msbx agent -d <agent>`. The dashboard stays open while it runs: the status line shows progress
+(the first run installs the agent), and the new card is selected when it is ready. Press `Enter`
+on the card to attach.
 
 | Key | Action |
 |---|---|
 | `←` / `h` | Previous agent |
 | `→` / `l` | Next agent |
-| `Enter` | Create and attach |
+| `Enter` | Create (without attaching) |
 | `Esc` | Cancel |
 
 ## Preset popup

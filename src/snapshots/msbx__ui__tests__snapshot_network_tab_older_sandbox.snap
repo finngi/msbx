@@ -1,6 +1,6 @@
 ---
 source: src/ui.rs
-assertion_line: 856
+assertion_line: 867
 expression: "draw(&app, 100, 30).backend()"
 ---
 "msbx   microVM sandboxes for coding agents · microsandbox                                     ? help"
@@ -8,10 +8,10 @@ expression: "draw(&app, 100, 30).backend()"
 "┌────────────────────────────────┐  scratch                                                         "
 "│ ● codex-api                    │  Overview   Logs   Network                                       "
 "│ codex                          │  ────────────────────────────────────────────────────────────────"
-"│ ~/dev/xap/api                  │  policy balanced · 0 blocked                                     "
-"│ cpu ▮▯▯▯▯▯ 18%  mem 2.1G/32G   │                                                                  "
-"│ stop    exec    remove         │  created before network policy; recreate with                    "
-"└────────────────────────────────┘  msb rm -f scratch                                               "
+"│ ~/dev/xap/api                  │  created before network policy; recreate with                    "
+"│ cpu ▮▯▯▯▯▯ 18%  mem 2.1G/32G   │  msb rm -f scratch                                               "
+"│ stop    exec    remove         │                                                                  "
+"└────────────────────────────────┘                                                                  "
 "┌────────────────────────────────┐                                                                  "
 "│ ■ pi-notes                     │                                                                  "
 "│ pi                             │                                                                  "
@@ -21,7 +21,7 @@ expression: "draw(&app, 100, 30).backend()"
 "└────────────────────────────────┘                                                                  "
 "┌────────────────────────────────┐                                                                  "
 "│ ● scratch                      │                                                                  "
-"│ —                      ↵ shell │                                                                  "
+"│ shell                 ↵ attach │                                                                  "
 "│ —                              │                                                                  "
 "│ cpu —  mem —                   │                                                                  "
 "│ stop    exec    remove         │                                                                  "

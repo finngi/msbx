@@ -19,16 +19,18 @@ msbx's help for its own commands.
 ## `msbx agent`
 
 ```text
-msbx agent <AGENT> [PATH] [-- <ARGS>...]
+msbx agent [-d] <AGENT> [PATH] [-- <ARGS>...]
 ```
 
-Starts (creating if needed) the agent's sandbox for a folder and attaches to the agent.
+Starts (creating if needed) the agent's sandbox for a folder and attaches to the agent. With
+`-d` / `--detach` it stops after step 7 below and prints how to attach later.
 
 | Argument | Meaning |
 |---|---|
 | `AGENT` | `codex`, `pi` or `shell` |
 | `PATH` | Project folder to mount at the same path inside the sandbox. Default: the current directory. |
-| `ARGS` | Arguments passed to the agent, after `--`. |
+| `ARGS` | Arguments passed to the agent, after `--`. Not allowed with `-d`. |
+| `-d`, `--detach` | Create or start the sandbox, but don't attach. |
 
 Behaviour:
 

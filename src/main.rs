@@ -46,6 +46,9 @@ enum Command {
         agent: AgentId,
         /// Project folder to mount at the same path inside the sandbox [default: current dir].
         path: Option<PathBuf>,
+        /// Create or start the sandbox, but don't attach; attach later with the same command.
+        #[arg(short, long, conflicts_with = "args")]
+        detach: bool,
         /// Arguments passed to the agent, after `--`.
         #[arg(last = true)]
         args: Vec<String>,
@@ -190,14 +193,27 @@ async fn run(cli: Cli) -> Result<u8> {
             tui::run(project, std::env::home_dir(), dirs).await?;
             Ok(0)
         }
-        Some(Command::Agent { agent, path, args }) => {
+        Some(Command::Agent {
+            agent,
+            path,
+            detach,
+            args,
+        }) => {
             let project = project_folder(path)?;
             secrets::resolve_environment(&dirs)?;
             sandbox::use_runtime(&attach::msb_path()?);
             policy_cli::require_or_ask(&dirs)?;
             proxy::ensure_running(&dirs).await?;
             let agent = agent.agent();
-            let name = sandbox::ensure(agent, &project).await?;
+            let name = sandbox::ensure(agent, &project, &|note| eprintln!("{note}")).await?;
+            if detach {
+                eprintln!(
+                    "{name} is running; attach with `msbx agent {} {}`",
+                    agent.id,
+                    project.display()
+                );
+                return Ok(0);
+            }
             attach::exec(&name, agent.command, &args).await
         }
         Some(Command::Secret(SecretAction::Set { var })) => secrets::set(&var),
@@ -309,10 +325,37 @@ mod tests {
     }
 
     fn agent_command(line: &[&str]) -> Result<(AgentId, Option<PathBuf>, Vec<String>)> {
-        let Some(Command::Agent { agent, path, args }) = Cli::try_parse_from(line)?.command else {
+        let Some(Command::Agent {
+            agent, path, args, ..
+        }) = Cli::try_parse_from(line)?.command
+        else {
             bail!("expected {line:?} to parse as the agent command");
         };
         Ok((agent, path, args))
+    }
+
+    #[test]
+    fn agent_detach_skips_attaching_and_takes_no_agent_args() -> Result<()> {
+        for line in [
+            ["msbx", "agent", "codex", "-d"].as_slice(),
+            &["msbx", "agent", "--detach", "pi", "/tmp"],
+        ] {
+            let Some(Command::Agent { detach, .. }) = Cli::try_parse_from(line)?.command else {
+                bail!("expected {line:?} to parse as the agent command");
+            };
+            assert!(detach, "{line:?}");
+        }
+        let Some(Command::Agent { detach, .. }) =
+            Cli::try_parse_from(["msbx", "agent", "codex"])?.command
+        else {
+            bail!("expected the agent command");
+        };
+        assert!(!detach, "attaching stays the default");
+        assert!(
+            Cli::try_parse_from(["msbx", "agent", "codex", "-d", "--", "--version"]).is_err(),
+            "agent arguments make no sense without attaching"
+        );
+        Ok(())
     }
 
     fn policy_command(line: &[&str]) -> Result<PolicyAction> {
