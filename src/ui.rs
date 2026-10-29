@@ -86,9 +86,9 @@ pub(crate) fn detail_scroll_limit(app: &App, width: u16, height: u16) -> usize {
     let [_, _, _, content] = pane_regions(Block::bordered().inner(panel));
     let mut visible = content.height;
     let lines = match app.tab {
-        Tab::Overview => app
-            .selected_sandbox()
-            .map_or_else(Vec::new, |sandbox| overview(sandbox, app.policy)),
+        Tab::Overview => app.selected_sandbox().map_or_else(Vec::new, |sandbox| {
+            overview(sandbox, app.policy, app.selected_git_changes())
+        }),
         Tab::Logs => app.logs.iter().cloned().map(Line::from).collect(),
         Tab::Network => {
             let Some(entry) = app
@@ -276,13 +276,27 @@ fn render_card(frame: &mut Frame, app: &App, sandbox: &SandboxInfo, selected: bo
         |path| shorten_home(path, app.home.as_deref()),
     );
     let marker = if selected { "▸ " } else { "" };
+    // Git files of the project changed since the last session (RFC 0001).
+    let badge = if app
+        .git_changes
+        .get(&sandbox.name)
+        .is_some_and(|changes| !changes.is_empty())
+    {
+        Line::from("git!".fg(Color::Red).bold())
+    } else {
+        Line::default()
+    };
     let lines = vec![
-        Line::from(vec![
-            marker.into(),
-            symbol.fg(colour),
-            " ".into(),
-            sandbox.name.clone().bold(),
-        ]),
+        spread(
+            vec![Line::from(vec![
+                marker.into(),
+                symbol.fg(colour),
+                " ".into(),
+                sandbox.name.clone().bold(),
+            ])],
+            badge,
+            width,
+        ),
         spread(vec![agent], hint, width),
         Line::from(project.dim()),
         card_metrics(sandbox),
@@ -322,7 +336,7 @@ fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
         Tab::Overview => render_scrolled(
             frame,
             content,
-            overview(sandbox, app.policy),
+            overview(sandbox, app.policy, app.selected_git_changes()),
             app.detail_scroll,
         ),
         Tab::Logs => render_logs(frame, app, content),
@@ -1214,7 +1228,11 @@ fn status_word(status: Status) -> &'static str {
     }
 }
 
-fn overview(sandbox: &SandboxInfo, policy: Option<Preset>) -> Vec<Line<'static>> {
+fn overview(
+    sandbox: &SandboxInfo,
+    policy: Option<Preset>,
+    git_changes: &[String],
+) -> Vec<Line<'static>> {
     let word = status_word(sandbox.status);
     let status = match sandbox.uptime {
         Some(uptime) => format!("{word} · up {}", format_duration(uptime)),
@@ -1255,6 +1273,7 @@ fn overview(sandbox: &SandboxInfo, policy: Option<Preset>) -> Vec<Line<'static>>
     if let Some(traffic) = traffic(sandbox) {
         lines.push(row("traffic", traffic));
     }
+    lines.extend(git_rows(sandbox, git_changes));
     lines.push(row("secrets", secrets));
     let mounts = if sandbox.mounts.is_empty() {
         vec!["—".to_owned()]
@@ -1265,6 +1284,34 @@ fn overview(sandbox: &SandboxInfo, policy: Option<Preset>) -> Vec<Line<'static>>
         lines.push(row(if index == 0 { "mounts" } else { "" }, mount));
     }
     lines.push(row("image", or_dash(sandbox.image.clone())));
+    lines
+}
+
+/// The `git` row: whether hooks and config are guarded in the VM, then what changed on the host
+/// since the last session started, for sandboxes msbx created (RFC 0001).
+fn git_rows(sandbox: &SandboxInfo, git_changes: &[String]) -> Vec<Line<'static>> {
+    if sandbox.agent.is_none() {
+        return Vec::new();
+    }
+    let state = if sandbox.git_guarded {
+        "guarded".to_owned()
+    } else {
+        format!("not guarded; recreate: msb rm -f {}", sandbox.name)
+    };
+    let mut lines = vec![row("git", state)];
+    if !git_changes.is_empty() {
+        lines.push(Line::from(vec![
+            format!("{:LABEL_WIDTH$}", "").dim(),
+            "changed since last session; review first:"
+                .fg(Color::Red)
+                .bold(),
+        ]));
+        lines.extend(
+            git_changes
+                .iter()
+                .map(|change| row("", format!("  {change}")).fg(Color::Red)),
+        );
+    }
     lines
 }
 
@@ -1446,6 +1493,7 @@ mod tests {
             uptime: None,
             network: None,
             proxied: false,
+            git_guarded: false,
             rx_bytes: None,
             tx_bytes: None,
             secrets: Vec::new(),
@@ -1492,6 +1540,7 @@ mod tests {
             uptime: Some(Duration::from_secs(12 * 60)),
             network: Some("public".to_owned()),
             proxied: true,
+            git_guarded: true,
             rx_bytes: Some(48 * 1024 * 1024 + 200 * 1024),
             tx_bytes: Some(3 * 1024 * 1024 + 100 * 1024),
             secrets: vec!["OPENAI_API_KEY".to_owned()],
@@ -1502,6 +1551,7 @@ mod tests {
             agent: Some("pi".to_owned()),
             project: Some(PathBuf::from("/home/dev/notes")),
             proxied: true,
+            git_guarded: true,
             ..info("pi-notes", Status::Stopped)
         };
         let older = SandboxInfo {
@@ -1618,6 +1668,58 @@ mod tests {
         let mut app = detail(Tab::Overview);
         app.selected = 1;
         snapshots("overview_stopped", &app)
+    }
+
+    fn with_git_changes() -> App {
+        let mut app = detail(Tab::Overview);
+        app.git_changes.insert(
+            "codex-api".to_owned(),
+            vec![
+                ".git/hooks/pre-commit (new)".to_owned(),
+                ".git/config: core.fsmonitor = ./tools/watch.sh (new)".to_owned(),
+            ],
+        );
+        app
+    }
+
+    #[test]
+    fn snapshot_git_changes() -> anyhow::Result<()> {
+        snapshots("git_changes", &with_git_changes())
+    }
+
+    #[test]
+    fn snapshot_git_changes_cards() -> anyhow::Result<()> {
+        let mut app = with_git_changes();
+        app.focus = Focus::Cards;
+        snapshots("git_changes_cards", &app)
+    }
+
+    #[test]
+    fn snapshot_overview_unguarded() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Overview);
+        app.selected = 1;
+        app.sandboxes[1].git_guarded = false;
+        snapshots("overview_unguarded", &app)
+    }
+
+    #[test]
+    fn git_badge_is_red_and_only_on_changed_cards() -> anyhow::Result<()> {
+        let mut app = populated();
+        app.git_changes
+            .insert("pi-notes".to_owned(), vec![".git (new)".to_owned()]);
+        let terminal = draw(&app, 100, 30)?;
+        let buffer = terminal.backend().buffer();
+        let text = format!("{buffer:?}");
+        assert_eq!(text.matches("git!").count(), 1, "{text}");
+        // The badge ends at the right edge of the pi-notes card's title row (row 11).
+        let cell =
+            anyhow::Context::context(buffer.cell((27, 11)), "the pi-notes title row is on screen")?;
+        assert_eq!(cell.symbol(), "g", "{text}");
+        assert_eq!(cell.fg, Color::Red);
+        let red_rows = with_git_changes();
+        let text = format!("{:?}", draw(&red_rows, 100, 30)?.backend().buffer());
+        assert!(text.contains("review first"), "{text}");
+        Ok(())
     }
 
     #[test]

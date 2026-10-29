@@ -1334,6 +1334,7 @@ mod tests {
     /// Installs git so the agent user can commit; the host-side guard needs nothing else.
     static GUARD_AGENT: Agent = Agent {
         id: "guardtest",
+        description: "git guard test agent",
         install: "apt-get update && apt-get install -y --no-install-recommends git",
         command: "true",
         secrets: &[],
