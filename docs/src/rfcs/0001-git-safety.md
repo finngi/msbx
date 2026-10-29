@@ -141,7 +141,7 @@ Conclusion: a read-only mount nested in a writable one is enforced per mount by 
 
 - The agent cannot `apt-get`, `sudo`, `git remote add`, `git config` the repository or set upstream branches. The how-to explains `msbx exec -t -u root`.
 - Older sandboxes keep root and no guards until recreated.
-- Six mounts where there was one; a project without `.git` keeps one.
+- Five mounts where there was one (six with a `config.worktree` or `.git` file, more with hooks-path or include targets); a project without `.git` keeps one.
 - The baseline is per sandbox name, so two sandboxes for one project track it separately.
 
 ## Security

@@ -1392,8 +1392,10 @@ mod tests {
             );
             assert_eq!(config.spec.runtime.user.as_deref(), Some(AGENT_USER));
             assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
+            // The project, `.git`, and read-only `config`, `hooks` and `info` (a fresh repo
+            // has no `config.worktree`).
             let guarded: Vec<String> = config.spec.mounts.iter().map(mount).collect();
-            assert_eq!(guarded.len(), 6, "{guarded:?}");
+            assert_eq!(guarded.len(), 5, "{guarded:?}");
 
             let (session, warning) = guard::Session::start(&dirs, &name, &project)?;
             assert_eq!(warning, None);
