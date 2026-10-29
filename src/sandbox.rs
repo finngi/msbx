@@ -152,15 +152,30 @@ pub(crate) async fn ensure(agent: &Agent, project: &Path) -> Result<String> {
         .await
         .with_context(|| format!("starting sandbox {name}"))?;
 
-    let prepared = async {
-        install_once(&sandbox, agent, &name).await?;
-        link_login(&sandbox, agent, &name).await?;
-        write_models(&sandbox, agent, &name).await
-    }
-    .await;
+    let prepared = prepare(&sandbox, agent, &name).await;
     // A detached sandbox's handle never owns the VM, so releasing it leaves the VM running.
     sandbox.detach().await;
     prepared.map(|()| name)
+}
+
+/// Starts the agent's existing sandbox if needed and refreshes its login link and models, for
+/// the TUI's attach, which skips `ensure`.
+pub(crate) async fn prepare_existing(name: &str, agent: &Agent) -> Result<()> {
+    ensure_login_volume_for(name).await?;
+    let sandbox = get(name)
+        .await?
+        .connect_or_start_detached()
+        .await
+        .with_context(|| format!("connecting to sandbox {name}"))?;
+    let prepared = prepare(&sandbox, agent, name).await;
+    sandbox.detach().await;
+    prepared
+}
+
+async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> {
+    install_once(sandbox, agent, name).await?;
+    link_login(sandbox, agent, name).await?;
+    write_models(sandbox, agent, name).await
 }
 
 /// The named volume holding the agent's sign-in, shared by all its sandboxes; `None` for
@@ -237,21 +252,30 @@ async fn link_login(sandbox: &Sandbox, agent: &Agent, name: &str) -> Result<()> 
     }
 }
 
-/// Guest shell script that makes `<dir>/<file>` a link to the same file on the login volume.
+/// Makes `$1/$2` a link to `$3/$2` on the login volume. Paths arrive as arguments, never as
+/// shell syntax, and the script runs unchanged on the host in tests.
+const LINK_LOGIN: &str = r#"set -eu
+umask 077
+guest="$1/$2"
+shared="$3/$2"
+mkdir -p "$1"
+# A sandbox could plant a link on the volume to redirect every other sandbox's writes.
+if [ -L "$shared" ]; then rm -f "$shared"; fi
+if [ -e "$shared" ] && [ ! -f "$shared" ]; then exit 1; fi
+# The agent replaced the link with a plain file (a fresh sign-in): the newest wins.
+if [ -f "$guest" ] && [ ! -L "$guest" ]; then mv -f "$guest" "$shared"; fi
+if [ -e "$guest" ] && [ ! -L "$guest" ]; then exit 1; fi
+ln -sfn "$shared" "$guest"
+if [ -f "$shared" ]; then chmod 600 "$shared"; fi
+"#;
+
+/// Guest shell script that links the agent's credential file to the login volume.
 fn login_script(login: &Login) -> String {
-    let dir = login.dir;
-    let guest = format!("{dir}/{}", login.file);
-    let shared = format!("{LOGIN_MOUNT}/{}", login.file);
+    // Login paths come from the static agent table, never from user input.
     format!(
-        "set -e\n\
-         grep -q ' {LOGIN_MOUNT} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
-         mkdir -p '{dir}'\n\
-         # A sandbox could plant a link on the volume to redirect every other sandbox's writes.\n\
-         if [ -L '{shared}' ]; then rm -f '{shared}'; fi\n\
-         # The agent replaced the link with a plain file (a fresh sign-in): the newest wins.\n\
-         if [ -f '{guest}' ] && [ ! -L '{guest}' ]; then mv -f '{guest}' '{shared}'; fi\n\
-         ln -sfn '{shared}' '{guest}'\n\
-         if [ -f '{shared}' ]; then chmod 600 '{shared}'; fi\n"
+        "grep -q ' {LOGIN_MOUNT} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
+         set -- '{}' '{}' '{LOGIN_MOUNT}'\n{LINK_LOGIN}",
+        login.dir, login.file
     )
 }
 
@@ -699,37 +723,84 @@ mod tests {
         assert_eq!(login_volume(AgentId::Shell.agent()), None);
     }
 
+    #[cfg(unix)]
+    fn run_link_script(root: &Path) -> Result<()> {
+        let output = std::process::Command::new("sh")
+            .args(["-c", LINK_LOGIN, "msbx-login"])
+            .arg(root.join("guest"))
+            .arg("auth.json")
+            .arg(root.join("volume"))
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "link script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    /// Runs the guest link script on the host against a temporary "guest" and "volume".
+    #[cfg(unix)]
     #[test]
-    fn login_script_links_the_guest_file_to_the_volume() {
+    fn login_script_migrates_repairs_and_ignores_planted_links() -> Result<()> {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!("msbx-login-script-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let outcome = (|| -> Result<()> {
+            std::fs::create_dir(root.join("volume"))?;
+            run_link_script(&root)?;
+            let guest = root.join("guest/auth.json");
+            let shared = root.join("volume/auth.json");
+            assert_eq!(std::fs::read_link(&guest)?, shared);
+            assert!(!shared.exists(), "no empty auth file is seeded");
+
+            // A write through the link lands on the volume.
+            std::fs::write(&guest, "first login")?;
+            run_link_script(&root)?;
+            assert_eq!(std::fs::read_to_string(&shared)?, "first login");
+            assert_eq!(
+                std::fs::metadata(&shared)?.permissions().mode() & 0o777,
+                0o600
+            );
+
+            // A fresh sign-in that replaced the link moves onto the volume.
+            std::fs::remove_file(&guest)?;
+            std::fs::write(&guest, "new login")?;
+            run_link_script(&root)?;
+            assert_eq!(std::fs::read_to_string(&shared)?, "new login");
+            assert!(std::fs::symlink_metadata(&guest)?.file_type().is_symlink());
+
+            // A link planted on the volume is removed, so its target is never written.
+            std::fs::write(root.join("victim"), "unchanged")?;
+            std::fs::remove_file(&shared)?;
+            symlink(root.join("victim"), &shared)?;
+            std::fs::remove_file(&guest)?;
+            std::fs::write(&guest, "safe login")?;
+            run_link_script(&root)?;
+            assert_eq!(std::fs::read_to_string(root.join("victim"))?, "unchanged");
+            assert!(!std::fs::symlink_metadata(&shared)?.file_type().is_symlink());
+            assert_eq!(std::fs::read_to_string(&shared)?, "safe login");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        outcome
+    }
+
+    #[test]
+    fn login_script_checks_the_mount_and_passes_paths_as_arguments() {
         let script = login_script(&Login {
             dir: "/root/.codex",
             file: "auth.json",
         });
-        assert!(script.starts_with("set -e\n"), "{script}");
         assert!(
-            script.contains("grep -q ' /root/.msbx-login ' /proc/mounts || exit 3"),
-            "{script}"
-        );
-        assert!(script.contains("mkdir -p '/root/.codex'"), "{script}");
-        assert!(
-            script.contains("if [ -L '/root/.msbx-login/auth.json' ]; then rm -f"),
+            script.starts_with("grep -q ' /root/.msbx-login ' /proc/mounts || exit 3\n"),
             "{script}"
         );
         assert!(
-            script.contains(
-                "if [ -f '/root/.codex/auth.json' ] && [ ! -L '/root/.codex/auth.json' ]; \
-                 then mv -f '/root/.codex/auth.json' '/root/.msbx-login/auth.json'; fi"
-            ),
+            script.contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login'\n"),
             "{script}"
         );
-        assert!(
-            script.contains("ln -sfn '/root/.msbx-login/auth.json' '/root/.codex/auth.json'"),
-            "{script}"
-        );
-        assert!(
-            script.contains("chmod 600 '/root/.msbx-login/auth.json'"),
-            "{script}"
-        );
+        assert!(script.ends_with(LINK_LOGIN), "{script}");
     }
 
     #[test]

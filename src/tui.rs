@@ -46,6 +46,10 @@ enum Job {
 
 #[derive(Debug, PartialEq)]
 enum Foreground {
+    Attach {
+        name: String,
+        agent: &'static Agent,
+    },
     Exec {
         name: String,
         command: &'static str,
@@ -182,8 +186,8 @@ fn step(action: Action, sandboxes: &[SandboxInfo]) -> Result<Step> {
             command: SHELL,
         }),
         Action::Attach { name } => {
-            let command = agent_of(sandboxes, &name)?.command;
-            Step::Suspend(Foreground::Exec { name, command })
+            let agent = agent_of(sandboxes, &name)?;
+            Step::Suspend(Foreground::Attach { name, agent })
         }
         Action::Create { agent, project } => Step::Suspend(Foreground::Create {
             agent: agents::find(&agent).with_context(|| format!("unknown agent {agent}"))?,
@@ -266,6 +270,11 @@ async fn suspend(terminal: &mut DefaultTerminal, foreground: Foreground) -> Resu
 
 async fn run_foreground(foreground: Foreground) -> Result<String> {
     let (name, code) = match foreground {
+        Foreground::Attach { name, agent } => {
+            sandbox::prepare_existing(&name, agent).await?;
+            let code = attach::exec(&name, agent.command, &[]).await?;
+            (name, code)
+        }
         Foreground::Exec { name, command } => {
             let code = attach::exec(&name, command, &[]).await?;
             (name, code)
@@ -335,15 +344,15 @@ mod tests {
     }
 
     #[test]
-    fn attach_runs_the_command_of_the_labelled_agent() -> Result<()> {
-        for (sandbox, command) in [("codex-api", "codex"), ("pi-notes", "pi")] {
+    fn attach_prepares_the_labelled_agent_before_running_it() -> Result<()> {
+        for (sandbox, agent) in [("codex-api", AgentId::Codex), ("pi-notes", AgentId::Pi)] {
             assert_eq!(
                 step_for(Action::Attach {
                     name: name(sandbox)
                 })?,
-                Step::Suspend(Foreground::Exec {
+                Step::Suspend(Foreground::Attach {
                     name: name(sandbox),
-                    command,
+                    agent: agent.agent(),
                 })
             );
         }

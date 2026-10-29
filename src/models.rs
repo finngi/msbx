@@ -31,9 +31,14 @@ pub(crate) fn guest_models_json() -> Result<Option<String>> {
     let path = host_models_path(agent_dir.as_deref(), std::env::home_dir().as_deref());
     let from_file = match path.filter(|path| path.is_file()) {
         Some(path) => {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            local_providers(&text).with_context(|| format!("reading {}", path.display()))?
+            let parsed = std::fs::read_to_string(&path)
+                .context("reading the file")
+                .and_then(|text| local_providers(&text));
+            // A broken host file should not stop pi from starting: fall back to probing.
+            parsed.unwrap_or_else(|error| {
+                eprintln!("note: ignoring {}: {error:#}", path.display());
+                None
+            })
         }
         None => None,
     };
@@ -75,17 +80,31 @@ pub(crate) fn local_providers(text: &str) -> Result<Option<Value>> {
     Ok(Some(json!({ "providers": kept })))
 }
 
-/// `scheme://<loopback>[:port][/path]` with the host swapped for the alias; `None` otherwise.
+/// `http(s)://<loopback>[:port][/path]` with the host swapped for the alias; `None` otherwise.
+/// Anything unusual is refused, so a URL like `http://localhost:1@cloud.example` (userinfo) can
+/// never carry a cloud provider and its key into the VM.
 fn rewrite_loopback(url: &str) -> Option<String> {
+    if url
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte == b' ' || byte == b'\\')
+    {
+        return None;
+    }
     let (scheme, rest) = url.split_once("://")?;
-    let (authority, path) = rest
-        .find('/')
-        .map_or((rest, ""), |slash| rest.split_at(slash));
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let (authority, path) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
     let (host, port) = split_host_port(authority);
-    LOOPBACK_HOSTS
-        .iter()
-        .any(|loopback| loopback.eq_ignore_ascii_case(host))
-        .then(|| format!("{scheme}://{HOST_ALIAS}{port}{path}"))
+    let port_ok = port.is_empty()
+        || port.strip_prefix(':').is_some_and(|digits| {
+            digits.bytes().all(|byte| byte.is_ascii_digit()) && digits.parse::<u16>().is_ok()
+        });
+    (port_ok
+        && LOOPBACK_HOSTS
+            .iter()
+            .any(|loopback| loopback.eq_ignore_ascii_case(host)))
+    .then(|| format!("{scheme}://{HOST_ALIAS}{port}{path}"))
 }
 
 /// Splits `host[:port]`, keeping the colon with the port. Bracketed IPv6 hosts are honoured.
@@ -258,6 +277,27 @@ mod tests {
             "a provider without baseUrl is a built-in override, not a local server"
         );
         Ok(())
+    }
+
+    #[test]
+    fn unusual_urls_are_never_rewritten() {
+        for url in [
+            "http://localhost:1234@cloud.example/v1",
+            "http://127.0.0.1@cloud.example/v1",
+            "http://user:pass@localhost/v1",
+            "http://localhost:bad/v1",
+            "http://localhost:99999/v1",
+            "http://localhost\\@cloud.example/v1",
+            "http://local host/v1",
+            "file://localhost/etc/passwd",
+            "http://cloud.example/localhost",
+        ] {
+            assert_eq!(rewrite_loopback(url), None, "{url}");
+        }
+        assert_eq!(
+            rewrite_loopback("http://localhost:1234?x=1#y"),
+            Some(format!("http://{HOST_ALIAS}:1234?x=1#y"))
+        );
     }
 
     #[test]
