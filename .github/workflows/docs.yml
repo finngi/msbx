@@ -17,9 +17,10 @@ permissions:
   contents: read
 
 env:
+  # Not named MDBOOK_*: mdBook reads every MDBOOK_* variable as a book.toml override.
   # mdbook-mermaid 0.17.1 is built against mdbook 0.5.0; matching them avoids a version warning.
-  MDBOOK_VERSION: 0.5.0
-  MDBOOK_MERMAID_VERSION: 0.17.1
+  DOCS_MDBOOK_VERSION: 0.5.0
+  DOCS_MERMAID_VERSION: 0.17.1
 
 jobs:
   build:
@@ -36,7 +37,7 @@ jobs:
       # Downloads the pinned release binaries and verifies their SHA-256 checksums.
       - uses: taiki-e/install-action@v2
         with:
-          tool: mdbook@${{ env.MDBOOK_VERSION }},mdbook-mermaid@${{ env.MDBOOK_MERMAID_VERSION }}
+          tool: mdbook@${{ env.DOCS_MDBOOK_VERSION }},mdbook-mermaid@${{ env.DOCS_MERMAID_VERSION }}
       # Writes mermaid.min.js and mermaid-init.js (git-ignored) for the pinned mdbook-mermaid.
       - run: mdbook-mermaid install docs
       - run: mdbook build docs
