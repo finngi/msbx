@@ -1,2 +1,6 @@
 /target
 *.snap.new
+/docs/book
+# Written by `mdbook-mermaid install docs` (see CONTRIBUTING.md).
+/docs/mermaid.min.js
+/docs/mermaid-init.js
