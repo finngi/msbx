@@ -1,7 +1,7 @@
 # RFC 0006: Per-project setup script
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#11](https://github.com/finngi/msbx/issues/11)
 
 ## Summary
 

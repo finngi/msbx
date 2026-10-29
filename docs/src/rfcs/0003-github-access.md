@@ -1,7 +1,7 @@
 # RFC 0003: GitHub access for agents
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#8](https://github.com/finngi/msbx/issues/8)
 
 ## Summary
 

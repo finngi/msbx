@@ -1,7 +1,7 @@
 # RFC 0008: Network: see a sandbox's policy and what it blocked
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#13](https://github.com/finngi/msbx/issues/13)
 
 ## Summary
 

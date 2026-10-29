@@ -1,7 +1,7 @@
 # RFC 0009: Ports: open servers running in a sandbox
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#14](https://github.com/finngi/msbx/issues/14)
 
 ## Summary
 

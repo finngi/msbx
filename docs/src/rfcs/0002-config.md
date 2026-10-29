@@ -1,7 +1,7 @@
 # RFC 0002: msbx config file
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#7](https://github.com/finngi/msbx/issues/7)
 
 ## Summary
 

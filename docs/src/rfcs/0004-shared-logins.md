@@ -1,7 +1,7 @@
 # RFC 0004: Shared agent logins
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#9](https://github.com/finngi/msbx/issues/9)
 
 ## Summary
 

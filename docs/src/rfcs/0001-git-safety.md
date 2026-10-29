@@ -1,7 +1,7 @@
 # RFC 0001: Git safety: stop agents running code on your Mac through git
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#6](https://github.com/finngi/msbx/issues/6)
 
 ## Summary
 

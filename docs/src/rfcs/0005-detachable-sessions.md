@@ -1,7 +1,7 @@
 # RFC 0005: Detachable agent sessions
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#10](https://github.com/finngi/msbx/issues/10)
 
 ## Summary
 

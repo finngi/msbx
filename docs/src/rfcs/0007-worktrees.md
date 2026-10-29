@@ -1,7 +1,7 @@
 # RFC 0007: Parallel agents with git worktrees
 
 - Status: Proposed
-- Tracking issue: #TBD
+- Tracking issue: [#12](https://github.com/finngi/msbx/issues/12)
 
 ## Summary
 
