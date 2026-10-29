@@ -4,13 +4,13 @@ Thanks for helping. msbx is small on purpose, so please read the scope rule befo
 
 ## Scope
 
-msbx does only what microsandbox's `msb` CLI lacks: the TUI (`msbx`) and `msbx run`. It does not wrap `ls`, `logs`, `stop`, `rm`, `exec` or other commands `msb` already has.
+msbx does only what microsandbox's `msb` CLI lacks: the TUI (`msbx`) and `msbx agent`. Every other command (`ls`, `logs`, `stop`, `rm`, `exec`, `run` and so on) is passed to `msb` unchanged; msbx does not wrap, reimplement or list them.
 
 If a feature belongs in the runtime, the SDK or `msb` itself, propose it upstream in [microsandbox](https://github.com/superradcompany/microsandbox) instead. For anything larger than a small fix, open an issue first so we can agree on the approach.
 
 ## Where to report bugs
 
-- **msbx bugs** (TUI, `msbx run`, sandbox naming or defaults): [open an issue here](https://github.com/finngi/msbx/issues/new/choose).
+- **msbx bugs** (TUI, `msbx agent`, sandbox naming or defaults): [open an issue here](https://github.com/finngi/msbx/issues/new/choose).
 - **microsandbox bugs** (VM boot, mounts, networking, secrets, `msb` commands): report them in [microsandbox's issues](https://github.com/superradcompany/microsandbox/issues). If you can reproduce it with `msb` alone, it is upstream.
 - **Security issues**: do not open a public issue. See [SECURITY.md](SECURITY.md).
 
@@ -25,7 +25,7 @@ If a feature belongs in the runtime, the SDK or `msb` itself, propose it upstrea
    You need macOS on Apple Silicon or Linux with KVM to run sandboxes. Building and the default tests do not need either.
 3. Build and run:
    ```sh
-   cargo run -- run shell .
+   cargo run -- agent shell .
    ```
 
 ## The gate

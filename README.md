@@ -1,6 +1,6 @@
-# msbx
+# msbx — microsandbox extended
 
-A terminal dashboard and one-command agent launcher for [microsandbox](https://github.com/superradcompany/microsandbox) microVMs.
+A terminal dashboard and one-command agent launcher for [microsandbox](https://github.com/superradcompany/microsandbox) microVMs. Every other command goes straight to `msb`.
 
 <!-- Screenshot: docs/screenshot.png (to be added) -->
 
@@ -12,12 +12,13 @@ msbx is an independent project. It is not affiliated with or endorsed by superra
 
 Docker Sandboxes (`sbx`) runs coding agents in microVMs, but it is a proprietary, binary-only product. microsandbox is an open-source (Apache-2.0) microVM runtime whose `msb` CLI and Rust SDK already cover mounts, resource limits, networking, host-side secrets and sandbox lifecycle.
 
-msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a single command that creates and attaches to a per-project agent sandbox.
+msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a single command that creates and attaches to a per-project agent sandbox. Anything else you type is passed to `msb`, so `msbx` can stand in for `msb` everywhere.
 
 ## Features
 
-- **`msbx run`**: one command to start a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
+- **`msbx agent`**: one command to start a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
 - **`msbx`**: a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, an Overview tab and a Logs tab.
+- **Everything else is `msb`**: `msbx ls`, `msbx logs NAME`, `msbx run IMAGE` and any other command run `msb` with the same arguments.
 - **Sensible sandbox defaults**:
   - the project folder is mounted at the same path as on the host
   - all host CPUs, with a 32 GiB memory limit
@@ -47,7 +48,7 @@ cargo install --git https://github.com/finngi/msbx
 ### Run an agent
 
 ```sh
-msbx run <codex|pi|shell> [PATH] [-- ARGS]
+msbx agent <codex|pi|shell> [PATH] [-- ARGS]
 ```
 
 - `PATH` defaults to the current directory.
@@ -56,10 +57,10 @@ msbx run <codex|pi|shell> [PATH] [-- ARGS]
 - Arguments after `--` are passed to the agent.
 
 ```sh
-msbx run codex                  # Codex in the current project
-msbx run pi ~/dev/myapp         # pi in another project
-msbx run shell                  # bash in the project sandbox
-msbx run codex -- --version     # pass arguments through to the agent
+msbx agent codex                # Codex in the current project
+msbx agent pi ~/dev/myapp       # pi in another project
+msbx agent shell                # bash in the project sandbox
+msbx agent codex -- --version   # pass arguments through to the agent
 ```
 
 | Agent | Command in the VM | Host-side secret |
@@ -68,7 +69,7 @@ msbx run codex -- --version     # pass arguments through to the agent
 | `pi` | `pi` | none (uses local models on the host) |
 | `shell` | `bash` | none |
 
-Sandbox settings are applied only when the sandbox is created. To change them, remove it with `msb rm -f <name>` and run `msbx run` again.
+Sandbox settings are applied only when the sandbox is created. To change them, remove it with `msb rm -f <name>` and run `msbx agent` again.
 
 ### Dashboard
 
@@ -89,6 +90,19 @@ msbx
 | `q` | Quit |
 
 Attaching hands the terminal to `msb exec -t`; the dashboard returns when you exit.
+
+### Everything else is msb
+
+Any command msbx does not define is passed to `msb` with its arguments unchanged. msbx replaces itself with `msb`, so the terminal, signals and exit code are exactly `msb`'s.
+
+```sh
+msbx ls                          # msb ls
+msbx logs codex-myapp -f         # msb logs codex-myapp -f
+msbx run alpine -- sh            # msb run alpine -- sh
+msbx exec -t shell-myapp -- bash # msb exec -t shell-myapp -- bash
+```
+
+`msbx --help` and `msbx --version` are msbx's own; use `msbx <command> --help` for msb's help on a command.
 
 ## Security model
 
@@ -112,18 +126,9 @@ Report msbx vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Relationship to microsandbox
 
-msbx uses the microsandbox Rust SDK (pinned to 0.7.11) and the `msb` CLI (for attaching). It does not fork or patch microsandbox.
+msbx uses the microsandbox Rust SDK (pinned to 0.7.11) and the `msb` CLI (for attaching and pass-through). It does not fork or patch microsandbox.
 
-Everything else stays in `msb`; msbx does not wrap it:
-
-| Task | Command |
-|---|---|
-| List sandboxes | `msb ls` |
-| Logs | `msb logs <name>` |
-| Metrics | `msb metrics <name>` |
-| Stop | `msb stop <name>` |
-| Remove | `msb rm <name>` |
-| Run a command | `msb exec <name> -- <cmd>` |
+msbx keeps no list of `msb` commands: anything it does not define is handed to whichever `msb` is on your `PATH`, so new `msb` commands work through msbx as soon as microsandbox ships them.
 
 ## Limitations and roadmap
 

@@ -64,7 +64,7 @@ pub(crate) struct App {
     /// Passed in rather than read from the environment so rendering stays deterministic.
     pub(crate) home: Option<PathBuf>,
     pub(crate) agents: Vec<&'static str>,
-    /// The sandbox name `msbx run` would use for an agent id and project. Injected so the create
+    /// The sandbox name `msbx agent` would use for an agent id and project. Injected so the create
     /// popup cannot disagree with the real naming while this module stays free of the SDK.
     pub(crate) sandbox_name: fn(&str, &Path) -> String,
 }

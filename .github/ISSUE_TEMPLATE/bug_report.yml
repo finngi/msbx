@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in msbx (the TUI or `msbx run`) does not work as expected.
+description: Something in msbx (the TUI or `msbx agent`) does not work as expected.
 labels: ["bug"]
 body:
   - type: markdown
@@ -36,7 +36,7 @@ body:
       label: Steps to reproduce
       placeholder: |
         1. cd ~/dev/myapp
-        2. msbx run shell
+        2. msbx agent shell
         3. ...
     validations:
       required: true

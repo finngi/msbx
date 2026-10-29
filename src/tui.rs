@@ -100,7 +100,7 @@ impl Drop for Session {
     }
 }
 
-/// The name `msbx run` gives `agent`'s sandbox for `project`; empty for an unknown agent.
+/// The name `msbx agent` gives `agent`'s sandbox for `project`; empty for an unknown agent.
 pub(crate) fn preview_name(agent: &str, project: &Path) -> String {
     agents::find(agent).map_or_else(String::new, |agent| sandbox::sandbox_name(agent, project))
 }

@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest a change to the msbx TUI or `msbx run`.
+description: Suggest a change to the msbx TUI or `msbx agent`.
 labels: ["enhancement"]
 body:
   - type: markdown
