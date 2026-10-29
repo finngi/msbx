@@ -16,7 +16,7 @@ People also work on different projects with different requirements, such as a cl
 ## Guide-level explanation
 
 - Set CPUs, memory, network access, login sharing and a setup script once. You can set them for all agents, for one agent, or for one project folder.
-- Name the environment variable that holds your GitHub token. The file never contains secret values, only variable names.
+- Name the environment variable that holds your GitHub token. The file stores only the variable name.
 - If the file has a typo or an unknown key, msbx stops before it starts anything and shows the line and column.
 
 ## Reference-level explanation
@@ -35,7 +35,7 @@ flowchart LR
   A[Built-in defaults] --> B["[defaults]"] --> C["[agents.&lt;id&gt;]"] --> D["[projects.&quot;&lt;path&gt;&quot;]"] --> E[Command-line flags]
 ```
 
-Read it from left to right: each step takes precedence over the previous step.
+Read it from left to right. Each step takes precedence over the previous one.
 
 Project tables use the absolute path of the project folder, as msbx sees it (with symlinks resolved). For example, `[projects."/Users/you/dev/api"]`.
 
@@ -75,11 +75,11 @@ github = { token_env = "MSBX_GITHUB_TOKEN_ACME" }
 
 msbx checks the file before it does anything else. It rejects:
 
-- unknown keys (for example `cpu` instead of `cpus`), and lists the valid ones
+- unknown keys (for example `cpu`, a typo for `cpus`), and lists the valid ones
 - `cpus` below 1 or above the number of CPU cores on your machine
 - `memory_mib` of 0
 - project paths that are not absolute
-- a `token_env` that looks like a token (`ghp_…`, `gho_…`, `github_pat_…`) rather than a variable name
+- a `token_env` that holds what looks like a token (`ghp_…`, `gho_…`, `github_pat_…`)
 
 Example:
 
@@ -100,7 +100,7 @@ unknown field `cpu`, expected one of `cpus`, `memory_mib`, `login`, ...
   - `path(xdg: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf>`
   - `load(path: Option<&Path>) -> anyhow::Result<Config>`: a missing file means defaults; an invalid file is an error
   - `Config::resolve(&self, agent: &str, project: &Path) -> Settings`
-- Use serde derive with `deny_unknown_fields`. New dependencies are `serde` and `toml`. Do not add `etcetera`: the XDG lookup is five lines with one caller.
+- Use serde derive with `deny_unknown_fields`. New dependencies are `serde` and `toml`. Do not add `etcetera`, because the XDG lookup is five lines with one caller.
 - `main` loads the config once, before the TUI starts. The resolved settings go into a plain `model::Launch` that is passed to `sandbox::ensure`. Only `sandbox.rs` talks to the SDK.
 - Tests:
   - parse errors: unknown key, token given as `token_env`, relative project path, empty file
@@ -109,21 +109,21 @@ unknown field `cpu`, expected one of `cpus`, `memory_mib`, `login`, ...
 
 ## Drawbacks
 
-This design has no separate list of limits. Its costs and trade-offs are covered under [Rationale and alternatives](#rationale-and-alternatives).
+The costs and trade-offs of this design are covered under [Rationale and alternatives](#rationale-and-alternatives).
 
 ## Security
 
 - The file holds no secrets. Keys that refer to secrets take an environment variable name. msbx reads the value from your environment when the sandbox starts, and microsandbox never stores it.
-- There is no config file inside the project folder. The agent can write to the project folder, so a config file there could widen the agent's own access the next time its sandbox is created.
+- msbx reads config only from your home folder. The agent can write to the project folder, so a config file there could widen the agent's own access the next time its sandbox is created.
 
 ## Rationale and alternatives
 
-- **User-level only, not a config file in the repo:** the agent can write to the project folder. A `.msbx/config.toml` there could widen the agent's own network or token access the next time its sandbox is created. Per-project settings go in `[projects."<path>"]` tables in your own file instead. The cost is that a project cannot ship shared settings for its contributors; that can come later with a check that it only narrows access.
-- **TOML:** what Rust tools and their users expect (Cargo, uv, rustfmt). It allows comments, and serde gives typed parsing with line and column errors. JSON has no comments, YAML has surprising implicit typing, and a custom format would need its own docs and parser.
-- **No `msbx config` command:** msbx passes unknown commands to msb, so a `config` command would shadow a future msb command of the same name, and editing a small file needs no command.
-- **No environment variable layer:** command-line flags already override the file. A parallel `MSBX_*` variable for every key doubles what we must document and test. The exception is variables that name secrets, which are references by design.
-- **XDG path on macOS too (`~/.config`), not `~/Library/Application Support`:** matches git, gh and uv, and gives users one path to remember. It is a five-line lookup, so no extra crate is needed.
-- **Not doing it:** each feature would grow its own flags or environment variables, and users would retype them on every launch.
+- User-level file only: the agent can write to the project folder. A `.msbx/config.toml` there could widen the agent's own network or token access the next time its sandbox is created. Per-project settings go in `[projects."<path>"]` tables in your own file. The cost is that a project cannot ship shared settings for its contributors; that can come later with a check that it only narrows access.
+- TOML: what Rust tools and their users expect (Cargo, uv, rustfmt). It allows comments, and serde gives typed parsing with line and column errors. JSON has no comments, YAML has surprising implicit typing, and a custom format would need its own docs and parser.
+- No `msbx config` command: msbx passes unknown commands to msb, so a `config` command would shadow a future msb command of the same name, and editing a small file needs no command.
+- No environment variable layer: command-line flags already override the file. A parallel `MSBX_*` variable for every key doubles what we must document and test. The exception is variables that name secrets, which are references by design.
+- XDG path on macOS too (`~/.config`), not `~/Library/Application Support`: matches git, gh and uv, and gives users one path to remember. It is a five-line lookup, so no extra crate is needed.
+- Doing nothing: each feature would grow its own flags or environment variables, and users would retype them on every launch.
 
 ## Prior art
 

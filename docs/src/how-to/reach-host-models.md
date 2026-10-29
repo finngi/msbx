@@ -33,7 +33,7 @@ is reachable.
 
 - The sandbox must have the `host` network profile. Sandboxes created by msbx do; check with
   `msbx inspect <name>` or the dashboard's Overview tab (`network  public + host`).
-- `localhost` inside the VM is the VM itself, not your Mac.
+- `localhost` inside the VM is the VM itself. Use `host.microsandbox.internal` to reach your Mac.
 
-Any service listening on your host is reachable this way, not only model servers. See the
+Any service listening on your host is reachable this way. See the
 [security model](../explanation/security-model.md).

@@ -17,7 +17,7 @@ msbx --version
 
 ## 2. Make a practice project
 
-Use a throwaway folder: the sandbox can write to everything in it.
+Use a throwaway folder, because the sandbox can write to everything in it.
 
 ```sh
 mkdir -p ~/msbx-tutorial
@@ -48,8 +48,8 @@ uname -a               # a Linux kernel, separate from your host's
 exit
 ```
 
-Back on the host, `cat vm.txt` prints `hello from the VM`: the project folder is shared, and
-nothing else on the host is visible to the VM.
+Back on the host, `cat vm.txt` prints `hello from the VM`. The project folder is shared with the
+VM, and it is the only part of the host the VM can see.
 
 The sandbox keeps running after you exit. Run `msbx agent shell` again and it reconnects in a
 second, with no install step.

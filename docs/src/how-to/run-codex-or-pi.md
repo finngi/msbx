@@ -31,12 +31,12 @@ sandbox has no key. Secrets are part of the sandbox settings, so
 msbx agent pi
 ```
 
-pi needs no API key: it uses models served on your host. See
+pi uses models served on your host, so it needs no API key. See
 [Reach Ollama or LM Studio on your Mac](reach-host-models.md).
 
 ## Another project folder
 
-Pass the folder instead of changing into it:
+Pass the folder path as an argument:
 
 ```sh
 msbx agent codex ~/dev/myapp

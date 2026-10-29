@@ -5,7 +5,7 @@
 
 ## Summary
 
-Today `msbx agent codex` runs the agent in your terminal. When you close the terminal, the agent shuts down, but its sandbox is still running. With this change the agent becomes a session in the sandbox that is independent of your terminal. Press Ctrl-] to keep it running (you can close the terminal too), then run `msbx agent codex` again or hit Enter in the dashboard to pick up the same conversation.
+Today `msbx agent codex` runs the agent in your terminal. When you close the terminal, the agent shuts down, but its sandbox is still running. With this change the agent becomes a session in the sandbox that is independent of your terminal. Press Ctrl-] to keep it running (you can close the terminal too), then run `msbx agent codex` again or press Enter in the dashboard to pick up the same conversation.
 
 ## Motivation
 
@@ -38,7 +38,7 @@ In the dashboard, an agent card says `codex · session running` (or `codex · 2 
 
 ## Reference-level explanation
 
-microsandbox 0.7.11 supports managed jobs: commands owned by the sandbox runtime rather than the terminal that started them. msbx launches the agent as a managed job with a terminal (PTY) and connects your terminal to it.
+microsandbox 0.7.11 supports managed jobs: commands that the sandbox runtime owns, independent of the terminal that started them. msbx launches the agent as a managed job with a terminal (PTY) and connects your terminal to it.
 
 To find a session, msbx queries the runtime for jobs running in the sandbox and selects the most recent one whose program is the agent's command, for example `codex`. msbx keeps no state files and adds no labels.
 
@@ -83,35 +83,35 @@ When the terminal closes, msbx sees the hangup signal and detaches before it exi
 
 ## Drawbacks
 
-- **No "detached" indicator.** The runtime reports whether a session is running, not whether anyone is attached to it. The card shows only "session running".
-- **Sessions end when the VM stops.** Stopping the sandbox (`s` in the dashboard, `msb stop`, or a host restart) ends its sessions, and the runtime does not restart them. The next `msbx agent` starts a fresh session. If your agent can resume an earlier conversation, pass its resume arguments after `--`.
-- **One writer at a time.** If a session is already attached in another terminal, a second `msbx agent` fails with a message that shows the read-only command. If msbx is killed without a chance to detach (for example with `kill -9`), the runtime frees the session after about 30 seconds.
-- **No scrollback on reattach.** Full-screen agents redraw. A plain shell (`msbx agent shell`) shows nothing until it prints again; press Enter to get a prompt.
-- **The detach key is fixed** at Ctrl-] by microsandbox.
-- **Finished sessions keep their output** (up to about 1 MiB each) on disk until the sandbox is removed.
-- **A terminal is required.** Sessions cannot be attached with redirected input.
+- The dashboard has no "detached" indicator. The runtime reports only whether a session is running, so the card shows "session running".
+- Sessions end when the VM stops. Stopping the sandbox (`s` in the dashboard, `msb stop`, or a host restart) ends its sessions, and the runtime does not restart them. The next `msbx agent` starts a fresh session. If your agent can resume an earlier conversation, pass its resume arguments after `--`.
+- Only one terminal can write to a session at a time. If a session is already attached in another terminal, a second `msbx agent` fails with a message that shows the read-only command. If msbx is killed without a chance to detach (for example with `kill -9`), the runtime frees the session after about 30 seconds.
+- Reattaching shows no scrollback. Full-screen agents redraw. A plain shell (`msbx agent shell`) shows nothing until it prints again; press Enter to get a prompt.
+- The detach key is fixed at Ctrl-] by microsandbox.
+- Finished sessions keep their output (up to about 1 MiB each) on disk until the sandbox is removed.
+- A terminal is required. Sessions cannot be attached with redirected input.
 - Detaching cleanly when the terminal closes is implemented for macOS and Linux only.
 
 ## Security
 
-- **Isolation is unchanged.** The session runs in the same VM with the same user, mounts, network rules and secrets as `msbx agent` today.
-- **Who can attach:** anyone who can use your microsandbox runtime, the same as for `msb exec` today.
-- **Arguments are stored.** Environment values are not stored with a session. The command and its arguments are, in plain text, in the sandbox's job history. Do not pass secrets as agent arguments; use the host-side secrets msbx already sets up.
-- **A detached agent keeps working while nobody watches,** with network access and write access to the project folder. End it with `msbx kill --job ID NAME`, or stop the sandbox.
+- Isolation is unchanged. The session runs in the same VM with the same user, mounts, network rules and secrets as `msbx agent` today.
+- Anyone who can use your microsandbox runtime can attach, the same as for `msb exec` today.
+- The sandbox's job history stores each session's command and arguments in plain text. Environment values are not stored. Do not pass secrets as agent arguments; use the host-side secrets msbx already sets up.
+- A detached agent keeps working while nobody watches, with network access and write access to the project folder. End it with `msbx kill --job ID NAME`, or stop the sandbox.
 
 ## Rationale and alternatives
 
-- **microsandbox managed jobs through the SDK (chosen):** the runtime already keeps a PTY process running with no client attached, limits input to one writer, and reports exit codes. The SDK gives msbx clear errors (for example "another terminal owns input") without parsing text output. msbx can also send a redraw signal right after attaching and detach cleanly when the terminal closes.
-- **Running `msb exec -d` and `msb attach` as child processes (rejected):** closest to the "msbx only adds what msb lacks" rule, but msbx would have to parse the job ID from msb's output, it cannot trigger a redraw at the right moment (so reattaching often shows a blank screen), and when a terminal closes the session stays locked for about 30 seconds.
-- **tmux (or zellij) inside the VM (rejected):** it would give scrollback, several attached clients and a configurable detach key. But it adds a package to every image and a second terminal layer whose prefix keys clash with agent shortcuts, needs session naming msbx would have to manage, and duplicates what the runtime already provides. Sessions would still end when the VM stops.
-- **Our own state file of session IDs (rejected):** the runtime can already list running jobs, and a separate file can go stale.
-- **Not doing it:** agents keep dying with their terminal. Users who know about `msb exec -d` can manage jobs by hand; everyone else loses work.
+- microsandbox managed jobs through the SDK (chosen): the runtime already keeps a PTY process running with no client attached, limits input to one writer, and reports exit codes. The SDK gives msbx clear errors (for example "another terminal owns input") without parsing text output. msbx can also send a redraw signal right after attaching and detach cleanly when the terminal closes.
+- Running `msb exec -d` and `msb attach` as child processes (rejected): closest to the "msbx only adds what msb lacks" rule, but msbx would have to parse the job ID from msb's output, it cannot trigger a redraw at the right moment (so reattaching often shows a blank screen), and when a terminal closes the session stays locked for about 30 seconds.
+- tmux (or zellij) inside the VM (rejected): it would give scrollback, several attached clients and a configurable detach key. But it adds a package to every image and a second terminal layer whose prefix keys clash with agent shortcuts, needs session naming msbx would have to manage, and duplicates what the runtime already provides. Sessions would still end when the VM stops.
+- Our own state file of session IDs (rejected): the runtime can already list running jobs, and a separate file can go stale.
+- Doing nothing: agents keep dying with their terminal. Users who know about `msb exec -d` can manage jobs by hand; everyone else loses work.
 
 ## Prior art
 
 - [tmux](https://man7.org/linux/man-pages/man1/tmux.1.html): a server process owns the sessions; clients attach and detach. `attach -d` takes over from other clients, and `-r` attaches read-only. We take the session that outlives its terminal, and the read-only watcher. We cannot copy takeover, because the runtime has no way to do it.
 - [docker attach](https://docs.docker.com/reference/cli/docker/container/attach/): detaches with Ctrl-P Ctrl-Q, configurable with `--detach-keys`, several clients at once, no history replay. We take the "one key to detach, the process keeps running" model.
-- [inoio/agents-sandbox](https://inoio.github.io/agents-sandbox/how-it-works.html) (GPL-3.0, ideas only, no code): runs an agent server inside the VM that several clients can attach to. This confirms that users want to come back to a running agent, but it depends on agents having a client/server mode, which ours do not.
+- [inoio/agents-sandbox](https://inoio.github.io/agents-sandbox/how-it-works.html) (GPL-3.0, ideas only, no code): runs an agent server inside the VM that several clients can attach to. This confirms that users want to come back to a running agent, but it depends on agents having a client/server mode, which ours lack.
 - [billroy/hoosegow](https://github.com/billroy/hoosegow) (MIT): its server owns the PTYs, and on reconnect it lists them, rejoins them and replays limited scrollback. We take "find the running session and rejoin it". We do not replay scrollback yet.
 
 ## Unresolved questions

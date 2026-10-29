@@ -54,7 +54,7 @@ msbx <COMMAND> [ARGS]...
 
 Any command msbx does not define runs `msb <COMMAND> [ARGS]...` with the arguments unchanged.
 On Unix msbx replaces itself with `msb`, so the terminal, signals and exit code are exactly
-`msb`'s. msbx keeps no list of `msb` commands: new ones work as soon as microsandbox ships them.
+`msb`'s. msbx keeps no list of `msb` commands, so new ones work as soon as microsandbox ships them.
 
 ```sh
 msbx ls                          # msb ls

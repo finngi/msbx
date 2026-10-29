@@ -11,7 +11,7 @@ applied only when the sandbox is created; to change them,
 | Mount | The project folder, read-write, at the same absolute path as on the host |
 | Working directory | The project folder |
 | CPUs | All host CPUs (capped at 255) |
-| Memory | 32 GiB limit. A ceiling, not a reservation: the host backs only pages the guest touches. |
+| Memory | 32 GiB limit. The host backs only the pages the guest touches. |
 | Network | microsandbox profiles `public` and `host`: the public internet plus services on the host at `host.microsandbox.internal` |
 | Secrets | The agent's API keys, if set on the host (see below) |
 | Labels | `msbx.agent=<agent>`, `msbx.project=<absolute project path>` |
@@ -24,7 +24,7 @@ applied only when the sandbox is created; to change them,
 | `codex` | `OPENAI_API_KEY` | `api.openai.com` |
 | `pi`, `shell` | none | |
 
-The sandbox stores a reference to the host variable, not its value. Each time the sandbox
+The sandbox stores only a reference to the host variable. Each time the sandbox
 starts, microsandbox reads the variable from the host environment. Inside the VM the variable
 holds a placeholder; microsandbox's proxy replaces it with the real value only on requests to
 the allowed host. A variable that is unset or empty when the sandbox is created is not

@@ -5,7 +5,7 @@
 
 ## Summary
 
-Run two or more agents on the same repo at once. Each gets its own git worktree, own branch and own sandbox, so they don't tread on each other's toes and overwrite each other's files. You see their commits show up in your repo right away.
+Run two or more agents on the same repo at once. Each gets its own git worktree, own branch and own sandbox, so each works on its own files. Their commits show up in your repo right away.
 
 ```sh
 msbx agent codex --worktree auth     # codex on branch msbx/auth
@@ -14,7 +14,7 @@ msbx agent pi --worktree search      # pi on branch msbx/search, at the same tim
 
 ## Motivation
 
-Running two agents on one repository today means one checkout and overwritten work. With git worktrees, each agent gets its own folder and branch, while sharing history. However, msbx mounts only the worktree folder, so git fails inside the VM when you point msbx at a worktree.
+Running two agents on one repository today means one checkout and overwritten work. With git worktrees, each agent gets its own folder and branch, while sharing history. Today msbx mounts only the worktree folder, so git fails inside the VM when you point msbx at a worktree.
 
 Making worktrees work, and adding `--worktree NAME` to create one, gives users parallel agents whose commits they see on the host straight away.
 
@@ -54,8 +54,8 @@ A worktree's own folder has only a `.git` file pointing into the `.git` in the m
 | `~/dev/app/.git/reftable` (if present) | read-write | the same, for repositories using the reftable format |
 | `~/dev/app/.git/worktrees/auth` | read-write | this worktree's HEAD and index |
 
-- The worktree is created on your Mac with hooks turned off and without a checkout. The files are checked out inside the VM, so filters such as Git LFS run there and not on your Mac.
-- Worktrees live next to the repository, not inside it. A sandbox on the main checkout therefore cannot touch them, and editors and search tools do not index the files twice.
+- The worktree is created on your Mac with hooks turned off and without a checkout. The files are checked out inside the VM, so filters such as Git LFS run there.
+- Worktrees live next to the repository, outside its folder. A sandbox on the main checkout therefore cannot touch them, and editors and search tools index the files only once.
 
 ### Implementation notes
 
@@ -74,26 +74,26 @@ A worktree's own folder has only a `.git` file pointing into the `.git` in the m
 
 ## Drawbacks
 
-- msbx never deletes a worktree. When you are done: `git worktree remove ~/dev/app.worktrees/auth`.
+- msbx never deletes a worktree. When you are done, run `git worktree remove ~/dev/app.worktrees/auth`.
 - Inside the VM, commands that write git config fail by design: `git config`, `git push -u`, and deleting branches that are packed. Automatic `git gc` is turned off there.
-- Refs are writable, so an agent can move any branch, not only its own. Check `git reflog` if a branch looks wrong.
+- Refs are writable, so an agent can move any branch. Check `git reflog` if a branch looks wrong.
 - Submodules are not supported. msbx warns that git may not work inside the VM.
 - msbx refuses `--worktree` when the repository uses per-worktree config (`extensions.worktreeConfig`). That file would be writable from the VM.
 
 ## Security
 
-- **Safer than a normal run:** hooks and config live in the read-only part, and the read-only mode is enforced on your Mac, not inside the VM.
-- **What stays writable:** the worktree's `.git` file and the small pointer files in `.git/worktrees/NAME`. An agent could aim them at a git folder it planted. The guard check compares them against the values msbx expects and warns after each session.
+- Worktree runs are safer than normal runs. Hooks and config live in the read-only part, and your Mac enforces the read-only mode, outside the VM's reach.
+- The worktree's `.git` file and the small pointer files in `.git/worktrees/NAME` stay writable. An agent could aim them at a git folder it planted. The guard check compares them against the values msbx expects and warns after each session.
 - A sandbox on the main checkout still has full write access to `.git`.
 
 ## Rationale and alternatives
 
-- **Sibling folder `<parent>/<repo>.worktrees/<name>` (chosen):** visible, needs no `.gitignore` entry, and matches git's own `../` examples. It sits outside the main checkout, so a sandbox there cannot tamper with it, and tools do not index the files twice.
-- **`.msbx/worktrees` inside the repository (rejected):** this is the convention Claude Code uses (`.claude/worktrees`). But the main checkout's sandbox could edit every worktree's git pointer files, and it needs `.gitignore` entries.
-- **`~/.msbx/worktrees` (rejected):** keeps the repository clean, but puts the files far from the repository and needs unique naming.
-- **Checkout inside the VM (chosen) vs on the host:** a checkout on the host runs filter drivers, and `post-checkout` hooks, from the repository's config. msbx creates the worktree on the host without a checkout, with hooks off, and checks out in the VM.
-- **Read-only shared `.git` with writable objects, refs and logs (chosen):** commits work, and hooks and config cannot change.
-- **Not doing it:** parallel agents stay impractical, and running msbx in a worktree stays broken.
+- Sibling folder `<parent>/<repo>.worktrees/<name>` (chosen): visible, needs no `.gitignore` entry, and matches git's own `../` examples. It sits outside the main checkout, so a sandbox there cannot tamper with it, and tools index the files only once.
+- `.msbx/worktrees` inside the repository (rejected): this is the convention Claude Code uses (`.claude/worktrees`). But the main checkout's sandbox could edit every worktree's git pointer files, and it needs `.gitignore` entries.
+- `~/.msbx/worktrees` (rejected): keeps the repository clean, but puts the files far from the repository and needs unique naming.
+- Checkout inside the VM (chosen) or on the host: a checkout on the host runs filter drivers, and `post-checkout` hooks, from the repository's config. msbx creates the worktree on the host without a checkout, with hooks off, and checks out in the VM.
+- Read-only shared `.git` with writable objects, refs and logs (chosen): commits work, and hooks and config cannot change.
+- Doing nothing: parallel agents stay impractical, and running msbx in a worktree stays broken.
 
 ## Prior art
 

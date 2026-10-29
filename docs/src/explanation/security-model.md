@@ -7,21 +7,21 @@ and [security policy](https://github.com/superradcompany/microsandbox/blob/main/
 ## Isolated
 
 - Each sandbox is a separate microVM with its own kernel.
-- Only the project folder is mounted. The rest of the host filesystem is not visible.
-- API keys are not placed in the VM. The VM sees a placeholder, which microsandbox replaces with
+- Only the project folder is mounted from the host filesystem.
+- API keys stay on the host. The VM sees a placeholder, which microsandbox replaces with
   the real key only on requests to the allowed host.
 
 ## Not isolated
 
-- **The project folder is writable from the VM.** An agent can modify or delete anything in it,
+- The project folder is writable from the VM. An agent can modify or delete anything in it,
   including `.git`. Commit or back up first.
-- **Network access is open.** The VM can reach the public internet, so it can send project
+- Network access is open. The VM can reach the public internet, so it can send project
   contents anywhere.
-- **Host services are reachable** at `host.microsandbox.internal`, not only Ollama. Anything
-  listening on the host may be reachable from the VM.
-- **TLS is intercepted when secrets are used.** To substitute keys, microsandbox adds a local CA
+- Host services are reachable at `host.microsandbox.internal`. Ollama is one of them, and
+  anything else listening on the host may be reachable from the VM too.
+- TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA
   to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
-- **Secret values live on the host**, in memory and possibly in microsandbox's host-side sandbox
+- Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox
   configuration (readable only by your user account).
 
 ## Known issue: git hooks can run VM-written code on the host
