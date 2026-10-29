@@ -37,9 +37,12 @@ Nothing changes in how you start an agent. What changes:
 warning: git files changed during this session in /Users/you/dev/app:
   .git/hooks/pre-commit (new)
   .git/config: core.fsmonitor = ./tools/watch.sh (new)
-git runs these on your Mac. Review them before running git in this folder:
-  git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C /Users/you/dev/app status
+git on your Mac runs what these name, even from `git status`. Do not run git in this folder yet; read the files as data from outside it:
+  cd / && env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null /usr/bin/git --no-pager config --file '/Users/you/dev/app/.git/config' --no-includes --null --list | od -c
+  od -c '/Users/you/dev/app/.git/hooks/<name>'
 ```
+
+The warning never suggests a git command on the project: experiments 6 and 7 below show `git status` with `core.hooksPath=/dev/null -c core.fsmonitor=false` running a planted clean filter (on an index refresh) and `core.hooksPath=/dev/null` leaving config-defined hooks (`hook.<name>.command`, git 2.54+) running. Only `git config --file F --no-includes --null --list` is known to execute nothing; piping through `od -c` keeps a planted value from redrawing the terminal, and msbx escapes control characters in its own output the same way.
 
 - The dashboard card shows `git!` in red when the project's git files changed since the last session started, and the Overview's `git` row lists what changed. The row reads `guarded` for a new sandbox and `not guarded (created before git guards; recreate with msb rm -f NAME)` for an older one.
 - `msbx agent` on an older sandbox prints `note: NAME was created before git guards; the agent runs as root and can change .git/hooks and .git/config; recreate it with msb rm -f NAME`.
@@ -111,6 +114,9 @@ Experiments on this Mac, msb 0.7.11, image `node:24-bookworm-slim`, a throwaway 
 | 2 | user `node`, `restricted`, fresh repo | `sudo -n id` fails: "The no new privileges flag is set"; commit without identity gives the usual "Please tell me who you are"; `git config user.email` fails (`Device or resource busy`), `--global` works; `git commit`, `branch`, `switch`, `tag`, `stash`, `reset --hard` succeed and the Mac sees the commits; a commit touched only `COMMIT_EDITMSG`, `index`, `logs/HEAD`, `logs/refs/heads/main`, `objects/*`, `refs/heads/main`; `git remote add` fails (`could not set 'remote.o.url'`); `git branch --set-upstream-to` prints the config error but exits 0; `core.fsmonitor` and `core.hooksPath` cannot be set; `.gitattributes` is writable; `.git` cannot be replaced by a file (`Is a directory`). `codex --version` (0.148.0), `pi --version` (1.4.0) and `codex exec` start as `node`. |
 | 3 | default profile, root (today's msbx) | `umount .git/hooks` exits 0, the hook write then succeeds, `umount .git/config` and `fsmonitor = /tmp/evil` appended; the Mac shows `.git/hooks/pre-commit` containing `evil` and the new setting. **Nested read-only mounts alone are no defence against root.** |
 | 4 | file mount vs host rewrite | `git config` on the Mac (temp file + rename) and a new hook on the Mac are both visible in the VM at once. |
+| 5 | the committed VM test without the proxy port (temporary edit) | `ensure` boots with the five guard mounts, user and profile stored; every write and unmount attempt by `node` and root fails as in experiment 1. |
+| 6 | git 2.56.0 on the Mac, temp repo | `hook.attack.command` + `hook.attack.event = pre-commit` ran on `git -c core.hooksPath=/dev/null commit` (exit 0); `-c hook.pre-commit.enabled=false` stopped it. `env -i PATH=/usr/bin:/bin … /usr/bin/git config --file CONFIG --no-includes --null --list` with a planted `core.fsmonitor` listed 18 entries and ran nothing. A fake `git` first on `PATH` was run by plain `git` and ignored by `/usr/bin/git` under `env -i`. |
+| 7 | git 2.56.0, planted `filter.attack.clean` + `*.txt filter=attack` | With `-c core.hooksPath=/dev/null -c core.fsmonitor=false`: `git status` after a content change left the filter alone; `git status` after a touch (index refresh) ran it, `git diff` ran it twice, `git add` ran it. No git command on the project is safe to recommend. |
 
 Conclusion: a read-only mount nested in a writable one is enforced per mount by the guest kernel and the virtiofs server, but the outer mount still reaches the same host directory once the inner one is gone. The guard holds only when nobody in the VM can unmount: an unprivileged user (mounts from a parent namespace are locked, experiment 1) and a root without `CAP_SYS_ADMIN` (`restricted`, experiment 1). Both are used.
 
@@ -119,8 +125,8 @@ Conclusion: a read-only mount nested in a writable one is enforced per mount by 
 | Layer | Closes | Residual risk |
 |---|---|---|
 | Agent as `node` under `restricted` | Unmounting or remounting the guards; `sudo`; setuid escalation | A kernel privilege escalation in the VM; agentd itself (runs as root with full capabilities) |
-| `.git` as its own rw mount; `hooks`, `info`, `config`, `config.worktree`, the `.git` file, a `core.hooksPath` directory and `include.path` files inside the project mounted read-only | Writing hooks, settings, attributes, the gitdir pointer; renaming or deleting `.git` or the guarded entries (`EBUSY`) | Everything else in the worktree is writable: `.gitattributes` (harmless without a driver in your global config), `.lfsconfig` (`lfs.url` only), `.husky/` when `core.hooksPath` is not set yet, nested repositories the agent creates under the project (git on the Mac uses them only if you `cd` there) |
-| Hardened host git helper (`hostgit.rs`): `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `--no-includes` on config reads | msbx running a planted command | None known; msbx only reads config and identity |
+| `.git` as its own rw mount; `hooks`, `info`, `config`, `config.worktree`, `objects/info/alternates`, the `.git` file, a `core.hooksPath` directory and `include.path` files inside the project mounted read-only; the same for every submodule git dir under `.git/modules` (own rw mount, so it cannot be swapped out from under its read-only `.git` pointer file) | Writing hooks, settings, attributes, the gitdir pointer; renaming or deleting `.git` or the guarded entries (`EBUSY`) | Everything else in the worktree is writable: `.gitattributes` (harmless without a driver in your global config), `.lfsconfig` (`lfs.url` only), `.husky/` when `core.hooksPath` is not set yet, nested repositories the agent creates under the project (git on the Mac uses them only if you `cd` there) |
+| Hardened host git helper (`hostgit.rs`): `/usr/bin/git` by absolute path, from `/`, with a cleared environment (`PATH=/usr/bin:/bin`, `GIT_ALLOW_PROTOCOL=`, `GIT_NO_LAZY_FETCH=1`, `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`), `--no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false`; config reads add `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_SYSTEM=/dev/null`, `GIT_CONFIG_GLOBAL=/dev/null` and `config --file F --no-includes --null --list`; the identity read keeps only `HOME` and `XDG_CONFIG_HOME` so it sees your global config | msbx running a planted command, or a planted `git` binary (a project on `PATH` through direnv) | None known; msbx only reads one named config file and your identity, and never runs a git command on the project |
 | Fingerprint before and after each session, and against a stored baseline at launch and in the dashboard | Changes going unnoticed in older sandboxes, in the worktree copies of hooks, or through a hole in the layers above | Detection, after the fact; only the listed files; a change made and reverted between checks |
 | Docs | Surprise | |
 
@@ -128,11 +134,11 @@ Conclusion: a read-only mount nested in a writable one is enforced per mount by 
 
 - `src/guard.rs` (pure, unit-tested with fixtures built by real `git`):
   - `repo(project) -> Option<Repo>`: `.git` directory, or a `.git` file parsed as `gitdir: <path>` (relative to the project); `Repo { git_dir, gitfile: Option<PathBuf> }`.
-  - `mounts(project) -> Vec<Guard>`: the host paths to mount and whether read-only, in parent-first order: `git_dir` (rw), `hooks`, `info` (ro, created when missing), `config`, `config.worktree`, the `.git` file (ro, when present), plus `core.hooksPath` and `include.path` targets that resolve inside the project. Empty when the git dir is outside the project (nothing to guard, and git does not work in the VM there anyway).
-  - `snapshot(project) -> Snapshot`: BLAKE3 hash and executable bit of each file git executes from (the files above, every file in the hooks directories), and the risky settings in `config` read through the hardened helper.
+  - `mounts(project) -> Plan { guards, notes }`: the host paths to mount and whether read-only, in parent-first order, for the project's git dir and every submodule git dir under `.git/modules` (found by walking for folders holding `HEAD` and `config`; a module's working tree comes from its `core.worktree`): `git_dir` (rw), `hooks`, `info` (ro, created when missing), `config`, `config.worktree`, `objects/info/alternates`, the `.git` pointer file (ro, when present), plus `core.hooksPath` and `include.path` targets that resolve inside the project. When the git dir is outside the project (linked worktree, submodule checkout) there are no guards and a `note:` says so, through `sandbox::Notify`.
+  - `snapshot(project) -> Snapshot`: BLAKE3 hash and executable bit of each file git executes from (the files above, every file in the hooks directories, for every git dir), and the risky settings of each config file read through the hardened helper. No file contents are stored: a config can hold credentials.
   - `changes(&before, &after) -> Vec<Change>` and `report(project, &changes) -> String`.
   - Baseline file: `$XDG_STATE_HOME/msbx/git-guard/<sandbox>.json` (serde_json, mode 600 via `paths::write_private`).
-- `src/hostgit.rs`: `command()`, `risky_settings(config)`, `identity()`.
+- `src/hostgit.rs`: `command()` (isolated, repository-config reads), `risky_settings(config)`, `identity()` (isolated, global config only), `is_risky(key, value)` with the table above plus `merge.tool`, `diff.tool`, `*.gpgSign`, `log.showSignature`, `gpg.*`, `extensions.*`, `remote.<n>.url`/`pushurl` (a URL chooses a transport helper), `submodule.<n>.url`, `sendemail.smtpServer`, `tar.<f>.command`, `alias.<n>.command`.
 - `src/sandbox.rs`: `ensure` adds `.user("node")`, `.security(SecurityProfile::Restricted)`, one `.volume` per `Guard`, label `msbx.git=guarded`; the login volume and files move under `/home/node`; install and login-link scripts run as root through `shell_with(|o| o.user("root"))`; the link script `chown`s the shared file to the sandbox user; `prepare` seeds the VM's global git identity. The sandbox user and login mount come from the stored config, so older root sandboxes keep working.
 - `src/main.rs` and `src/tui.rs`: `guard::Session::start` before attach (warns against the baseline, saves a new baseline), `finish` after (warns about the session). The dashboard refresh task compares each project with its baseline every tick and sets `App.git_changes`; `ui.rs` renders the badge and the `git` row.
 - Tests: unit tests for `repo`, `mounts`, `snapshot`/`changes` (hooks added, removed, edited, mode bit; risky keys; gitdir file; hooksPath inside the project; include.path), `report`, the hardened command's arguments, identity parsing, the snapshot baseline round trip, the TUI `git!` badge and row; one `#[ignore]` real-VM test: the agent user cannot write `.git/hooks/x`, change `core.fsmonitor` or unmount the guards, even as root, but can `git commit`, and a hook planted on the host side is reported by `changes`.
@@ -163,6 +169,9 @@ The threat is a prompt-injected agent, or a repository designed to attack its us
 - Parsing `.git/config` in Rust (rejected): git's parser has quoting, continuation and include rules an attacker could exploit against a weaker reimplementation; `git config --file F --list -z --no-includes` through the hardened helper reads only.
 - A `git_guard = false` setting (rejected): the check is cheap and only prints; no knob until someone needs one.
 - Blocking nested repositories by name, as Claude Code's deny list does (rejected): git on the Mac only uses a nested repository if you `cd` into it; listed as residual risk.
+- Storing full control-file contents in the baseline (rejected): a config can hold credentials; hashes and executable bits detect the same changes.
+- Refusing to attach to sandboxes created before the guard (rejected): a user's running work would stop dead; the note on attach and the dashboard's `git` row say what to do, and detection still runs for them.
+- Refusing projects whose guarded paths are symlinks or hard links, or whose object store uses alternates (rejected): a symlinked `.git/hooks` is mounted by the SDK with the symlink unfollowed (`follow_root_symlinks` is off) so the guard still binds the real folder; `objects/info/alternates` only redirects object reads, so it is mounted read-only. Linked worktrees and submodule checkouts as the project get a note and still start, since nothing is mounted for them and git does not run in the VM there.
 
 ## Prior art
 
@@ -170,8 +179,8 @@ See "Prior art, exactly" above; links: [Codex linux-sandbox](https://raw.githubu
 
 ## Unresolved questions
 
-- Linked worktrees ([RFC 0007](0007-worktrees.md)): the shared `.git` is outside the project, so no guard applies and git does not run in the VM; RFC 0007 should mount the common dir with the same guard list.
-- Submodules: each `.git/modules/<name>` has its own `hooks` and `config`; not guarded yet.
+- Linked worktrees ([RFC 0007](0007-worktrees.md)): the shared `.git` is outside the project, so no guard applies (msbx prints a note) and git does not run in the VM; RFC 0007 should mount the common dir with the same guard list.
+- A submodule added after the sandbox was created has no mounts until the sandbox is recreated; detection covers it.
 
 ## Future possibilities
 

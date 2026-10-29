@@ -165,7 +165,11 @@ async fn ensure_with_mode(
              (export it, or store it with `msbx secret set {var}`)"
         ));
     }
-    let guards = guard::mounts(project)?;
+    let plan = guard::mounts(project)?;
+    for note in &plan.notes {
+        notify(note.clone());
+    }
+    let guards = plan.guards;
     let git_label = if guards.is_empty() {
         GIT_NONE
     } else {

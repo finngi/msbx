@@ -95,13 +95,16 @@ aliases in `.git/config`. Cursor shipped this as CVE-2026-26268. msbx closes it 
 
 - In new sandboxes the agent runs as the unprivileged user `node` under microsandbox's
   `restricted` profile (`no_new_privs`, no `CAP_SYS_ADMIN` even for root). `.git` is its own
-  read-write mount, and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree`, a
-  `.git` pointer file, and any `core.hooksPath` or `include.path` target inside the project
-  are read-only mounts. Measured in a VM: the agent and root both get `Read-only file system`
-  or `Device or resource busy`, `umount` fails, and `git commit` works.
-- msbx runs git on your Mac only through one helper with `core.hooksPath=/dev/null`,
-  `core.fsmonitor=false` and no config includes, and only to read a repository's config and
-  your identity.
+  read-write mount, and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree`,
+  `.git/objects/info/alternates`, a `.git` pointer file, and any `core.hooksPath` or
+  `include.path` target inside the project are read-only mounts; every submodule git dir under
+  `.git/modules` gets the same. Measured in a VM: the agent and root both get `Read-only file
+  system` or `Device or resource busy`, `umount` fails, and `git commit` works.
+- msbx runs git on your Mac only as `/usr/bin/git` from `/` with a cleared environment, hooks,
+  fsmonitor, includes, prompts and protocols off, and only to parse one named config file and
+  read your identity. It never runs a git command on the project, and its warnings never ask
+  you to: `git status` runs a planted clean filter, and `core.hooksPath=/dev/null` does not
+  stop config-defined hooks.
 - msbx fingerprints those files before each session and warns, on the terminal and with a
   `git!` badge in the dashboard, when they changed during a session or since the last one.
 
@@ -113,8 +116,9 @@ What stays open:
   are writable). That costs you work; no code runs on your Mac.
 - `.gitattributes` and `.lfsconfig` are writable; they only matter with a filter driver in your
   global config (git-lfs reads only a safe subset of `.lfsconfig`). A nested repository the
-  agent creates under the project is only used if you `cd` into it. Submodules and linked
-  worktrees are not guarded yet.
+  agent creates under the project is only used if you `cd` into it. A linked worktree or a
+  submodule checkout used as the project is not guarded (its git data is outside the folder);
+  msbx prints a note when it creates such a sandbox.
 - Anything else on your Mac that reacts to project files (`package.json` scripts, `mise.toml`,
   editor tasks) is out of scope.
 

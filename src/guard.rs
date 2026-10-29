@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::hostgit;
 use crate::paths::{self, Dirs};
 
+/// Submodules nest (`.git/modules/a/modules/b`); deeper than this is not a layout git makes.
+const MAX_MODULE_DEPTH: usize = 32;
+
 /// Where a project's git data lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Repo {
@@ -21,7 +24,18 @@ pub(crate) struct Repo {
     pub(crate) gitfile: Option<PathBuf>,
 }
 
-/// A host path mounted at the same place in the VM so git data cannot be planted: the git dir
+/// A git directory whose control files git on the host reads: the project's own, or a
+/// submodule's under `.git/modules`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ControlDir {
+    git_dir: PathBuf,
+    /// The working tree a relative `core.hooksPath` is resolved against.
+    worktree: PathBuf,
+    /// The `gitdir:` pointer file of that working tree, when it has one.
+    gitfile: Option<PathBuf>,
+}
+
+/// A host path mounted at the same place in the VM so git data cannot be planted: a git dir
 /// itself read-write (so it cannot be renamed or replaced), the rest read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Guard {
@@ -29,20 +43,27 @@ pub(crate) struct Guard {
     pub(crate) readonly: bool,
 }
 
+/// The guard mounts for a project, and notes about what could not be guarded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Plan {
+    pub(crate) guards: Vec<Guard>,
+    pub(crate) notes: Vec<String>,
+}
+
 /// Fingerprint of everything git executes from in a project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     /// Project-relative path (absolute when outside the project) to its fingerprint.
     files: BTreeMap<String, FileState>,
-    /// The repository config file, as shown in warnings.
-    config: Option<String>,
-    /// Risky settings in that file (see `hostgit::is_risky`), key to its values in file order.
-    settings: BTreeMap<String, Vec<String>>,
+    /// Per config file (same keys as `files`), its risky settings (see `hostgit::is_risky`),
+    /// key to values in file order.
+    settings: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileState {
-    /// BLAKE3 of the contents, hex.
+    /// BLAKE3 of the contents, hex. Contents themselves are never stored: a config can hold
+    /// credentials.
     hash: String,
     /// Git ignores hooks without the executable bit, so flipping it is a change.
     executable: bool,
@@ -79,41 +100,66 @@ impl fmt::Display for What {
     }
 }
 
+/// Paths, keys and values come from the project, so they are shown with control characters
+/// escaped: a planted name must not redraw the terminal.
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::File { path, what } => write!(f, "{path} ({what})"),
+            Self::File { path, what } => write!(f, "{} ({what})", escape(path)),
             Self::Setting {
                 config,
                 key,
                 value,
                 what,
-            } => write!(f, "{config}: {key} = {value} ({what})"),
+            } => write!(
+                f,
+                "{}: {} = {} ({what})",
+                escape(config),
+                escape(key),
+                escape(value)
+            ),
         }
     }
+}
+
+/// `text` with control characters (newlines, escapes) written out as `\n`, `\u{1b}` and so on.
+pub(crate) fn escape(text: &str) -> String {
+    text.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }
 
 /// The project's repository, if `.git` is a directory or a `gitdir:` file.
 pub(crate) fn repo(project: &Path) -> Option<Repo> {
     let dot_git = project.join(".git");
-    let metadata = std::fs::symlink_metadata(&dot_git).ok()?;
+    let git_dir = resolve_marker(&dot_git)?;
+    Some(Repo {
+        gitfile: (git_dir != dot_git).then_some(dot_git),
+        git_dir,
+    })
+}
+
+/// The git dir a `.git` entry stands for: itself when a directory, the `gitdir:` target when a
+/// pointer file (relative to the file's folder).
+fn resolve_marker(dot_git: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(dot_git).ok()?;
     if metadata.is_dir() {
-        return Some(Repo {
-            git_dir: dot_git,
-            gitfile: None,
-        });
+        return Some(dot_git.to_path_buf());
     }
     if !metadata.is_file() {
         return None;
     }
-    let target = gitdir_target(&std::fs::read_to_string(&dot_git).ok()?)?;
-    Some(Repo {
-        git_dir: if target.is_absolute() {
-            target
-        } else {
-            project.join(target)
-        },
-        gitfile: Some(dot_git),
+    let target = gitdir_target(&std::fs::read_to_string(dot_git).ok()?)?;
+    Some(if target.is_absolute() {
+        target
+    } else {
+        normalize(&dot_git.parent()?.join(target))
     })
 }
 
@@ -123,46 +169,123 @@ fn gitdir_target(text: &str) -> Option<PathBuf> {
     (!target.is_empty()).then(|| PathBuf::from(target))
 }
 
-/// The mounts that guard a project's git data, parent first. `hooks` and `info` are created when
-/// missing so they can be mounted. Empty when there is no repository, or its git dir is outside
-/// the project (nothing to guard; git does not work in the VM there either).
-pub(crate) fn mounts(project: &Path) -> Result<Vec<Guard>> {
-    let Some(repo) = repo(project) else {
-        return Ok(Vec::new());
-    };
-    if !inside(project, &repo.git_dir) {
-        return Ok(Vec::new());
-    }
-    for name in ["hooks", "info"] {
-        let dir = repo.git_dir.join(name);
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let mut guards = vec![Guard {
-        path: repo.git_dir.clone(),
-        readonly: false,
+/// The project's git dir and every submodule git dir under its `modules/`.
+fn control_dirs(project: &Path, repo: &Repo) -> Vec<ControlDir> {
+    let mut dirs = vec![ControlDir {
+        git_dir: repo.git_dir.clone(),
+        worktree: project.to_path_buf(),
+        gitfile: repo.gitfile.clone(),
     }];
-    let readonly = ["hooks", "info", "config", "config.worktree"]
-        .into_iter()
-        .map(|name| repo.git_dir.join(name))
-        .chain(repo.gitfile.clone())
-        .chain(config_targets(project, &repo))
-        .filter(|path| path.exists() && inside(project, path));
-    for path in readonly {
-        if !guards.iter().any(|guard| same_path(&guard.path, &path)) {
-            guards.push(Guard {
-                path,
-                readonly: true,
-            });
-        }
-    }
-    Ok(guards)
+    collect_modules(&repo.git_dir.join("modules"), 0, &mut dirs);
+    dirs
 }
 
-/// Paths the repository config points git at: the hooks directory and included config files.
+/// Walks `.git/modules`: a folder holding `HEAD` and `config` is a submodule's git dir (its
+/// path mirrors the submodule path, so intermediate folders are plain), which may nest its own.
+fn collect_modules(dir: &Path, depth: usize, out: &mut Vec<ControlDir>) {
+    if depth > MAX_MODULE_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_dir())
+        .collect();
+    children.sort();
+    for child in children {
+        if child.join("HEAD").is_file() && child.join("config").is_file() {
+            let worktree = module_worktree(&child);
+            let gitfile = worktree
+                .as_deref()
+                .map(|worktree| worktree.join(".git"))
+                .filter(|gitfile| gitfile.is_file());
+            out.push(ControlDir {
+                worktree: worktree.unwrap_or_else(|| child.clone()),
+                git_dir: child.clone(),
+                gitfile,
+            });
+            collect_modules(&child.join("modules"), depth + 1, out);
+        } else {
+            collect_modules(&child, depth + 1, out);
+        }
+    }
+}
+
+/// A submodule git dir records its working tree in `core.worktree`, relative to itself.
+fn module_worktree(git_dir: &Path) -> Option<PathBuf> {
+    let settings = hostgit::risky_settings(&git_dir.join("config")).ok()?;
+    let value = settings.get("core.worktree")?.last()?;
+    let path = Path::new(value);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        normalize(&git_dir.join(path))
+    })
+}
+
+/// The mounts that guard a project's git data, parent first. `hooks` and `info` are created when
+/// missing so they can be mounted. Empty, with a note, when the git dir is outside the project
+/// (a linked worktree: nothing to guard, and git does not work in the VM there either); empty
+/// without a note when there is no repository.
+pub(crate) fn mounts(project: &Path) -> Result<Plan> {
+    let Some(repo) = repo(project) else {
+        return Ok(Plan::default());
+    };
+    if !inside(project, &repo.git_dir) {
+        return Ok(Plan {
+            guards: Vec::new(),
+            notes: vec![format!(
+                "note: the git data of {} is at {}, outside the project (a linked worktree or \
+                 submodule checkout): it is not guarded, and git does not work in the VM there",
+                project.display(),
+                repo.git_dir.display()
+            )],
+        });
+    }
+    let mut guards = Vec::new();
+    let mut add = |path: PathBuf, readonly: bool| {
+        if !guards
+            .iter()
+            .any(|guard: &Guard| same_path(&guard.path, &path))
+        {
+            guards.push(Guard { path, readonly });
+        }
+    };
+    for control in control_dirs(project, &repo) {
+        for name in ["hooks", "info"] {
+            let dir = control.git_dir.join(name);
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        add(control.git_dir.clone(), false);
+        let readonly = [
+            "hooks",
+            "info",
+            "config",
+            "config.worktree",
+            "objects/info/alternates",
+        ]
+        .into_iter()
+        .map(|name| control.git_dir.join(name))
+        .chain(control.gitfile.clone())
+        .chain(config_targets(&control))
+        .filter(|path| path.exists() && inside(project, path));
+        for path in readonly {
+            add(path, true);
+        }
+    }
+    Ok(Plan {
+        guards,
+        notes: Vec::new(),
+    })
+}
+
+/// Paths the config of a git dir points git at: the hooks directory and included config files.
 /// A relative `core.hooksPath` is relative to the working tree, a relative `include.path` to the
 /// config file. `~` paths are the user's own, outside the project.
-fn config_targets(project: &Path, repo: &Repo) -> Vec<PathBuf> {
-    let Ok(settings) = hostgit::risky_settings(&repo.git_dir.join("config")) else {
+fn config_targets(control: &ControlDir) -> Vec<PathBuf> {
+    let Ok(settings) = hostgit::risky_settings(&control.git_dir.join("config")) else {
         return Vec::new();
     };
     settings
@@ -170,9 +293,9 @@ fn config_targets(project: &Path, repo: &Repo) -> Vec<PathBuf> {
         .flat_map(|(key, values)| values.iter().map(move |value| (key, value)))
         .filter_map(|(key, value)| {
             let base = if key == "core.hookspath" {
-                project
+                &control.worktree
             } else if key == "include.path" || key.starts_with("includeif.") {
-                &repo.git_dir
+                &control.git_dir
             } else {
                 return None;
             };
@@ -213,62 +336,68 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Fingerprints the project's git files. `previous` saves re-reading the config with git when
+/// Fingerprints the project's git files. `previous` saves re-reading a config with git when
 /// the file has not changed.
 pub(crate) fn snapshot(project: &Path, previous: Option<&Snapshot>) -> Result<Snapshot> {
     let Some(repo) = repo(project) else {
         return Ok(Snapshot::default());
     };
     let mut files = BTreeMap::new();
-    let mut hooks_dirs = vec![repo.git_dir.join("hooks")];
-    let mut singles = vec![
-        repo.git_dir.join("config"),
-        repo.git_dir.join("config.worktree"),
-        repo.git_dir.join("commondir"),
-        repo.git_dir.join("info").join("attributes"),
-    ];
-    singles.extend(repo.gitfile.clone());
-    for target in config_targets(project, &repo) {
-        if target.is_dir() {
-            hooks_dirs.push(target);
-        } else {
-            singles.push(target);
+    let mut settings = BTreeMap::new();
+    for control in control_dirs(project, &repo) {
+        let mut dirs = vec![control.git_dir.join("hooks")];
+        let mut singles = vec![
+            control.git_dir.join("config"),
+            control.git_dir.join("config.worktree"),
+            control.git_dir.join("commondir"),
+            control.git_dir.join("info").join("attributes"),
+            control
+                .git_dir
+                .join("objects")
+                .join("info")
+                .join("alternates"),
+        ];
+        singles.extend(control.gitfile.clone());
+        for target in config_targets(&control) {
+            if target.is_dir() {
+                dirs.push(target);
+            } else {
+                singles.push(target);
+            }
         }
-    }
-    for dir in hooks_dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries {
+                singles.push(
+                    entry
+                        .with_context(|| format!("reading {}", dir.display()))?
+                        .path(),
+                );
+            }
+        }
+        for path in singles {
+            if let Some(state) = file_state(&path)? {
+                files.insert(relative(project, &path), state);
+            }
+        }
+        let config_path = control.git_dir.join("config");
+        let config = relative(project, &config_path);
+        if !files.contains_key(&config) {
             continue;
+        }
+        let unchanged =
+            previous.filter(|previous| previous.files.get(&config) == files.get(&config));
+        let risky = match unchanged.and_then(|previous| previous.settings.get(&config)) {
+            Some(known) => known.clone(),
+            None => hostgit::risky_settings(&config_path)
+                .ok()
+                .unwrap_or_default(),
         };
-        for entry in entries {
-            singles.push(
-                entry
-                    .with_context(|| format!("reading {}", dir.display()))?
-                    .path(),
-            );
-        }
+        settings.insert(config, risky);
     }
-    for path in singles {
-        if let Some(state) = file_state(&path)? {
-            files.insert(relative(project, &path), state);
-        }
-    }
-    let config_path = repo.git_dir.join("config");
-    let config = relative(project, &config_path);
-    let has_config = files.contains_key(&config);
-    let settings = match previous {
-        Some(previous) if previous.files.get(&config) == files.get(&config) => {
-            previous.settings.clone()
-        }
-        _ if has_config => hostgit::risky_settings(&config_path)
-            .ok()
-            .unwrap_or_default(),
-        _ => BTreeMap::new(),
-    };
-    Ok(Snapshot {
-        files,
-        config: has_config.then_some(config),
-        settings,
-    })
+    Ok(Snapshot { files, settings })
 }
 
 /// `None` for anything that is not a regular file (a missing path, a directory, a symlink).
@@ -305,7 +434,8 @@ fn relative(project: &Path, path: &Path) -> String {
         .to_string()
 }
 
-/// What changed between two fingerprints: files in path order, then settings in key order.
+/// What changed between two fingerprints: files in path order, then settings per config file
+/// in key order.
 pub(crate) fn changes(before: &Snapshot, after: &Snapshot) -> Vec<Change> {
     let mut changes = Vec::new();
     let paths: BTreeSet<&String> = before.files.keys().chain(after.files.keys()).collect();
@@ -321,46 +451,61 @@ pub(crate) fn changes(before: &Snapshot, after: &Snapshot) -> Vec<Change> {
             what,
         });
     }
-    let config = after
-        .config
-        .clone()
-        .or_else(|| before.config.clone())
-        .unwrap_or_else(|| ".git/config".to_owned());
-    let keys: BTreeSet<&String> = before
+    let empty = BTreeMap::new();
+    let configs: BTreeSet<&String> = before
         .settings
         .keys()
         .chain(after.settings.keys())
         .collect();
-    for key in keys {
-        let (values, what) = match (before.settings.get(key), after.settings.get(key)) {
-            (None, Some(new)) => (new, What::New),
-            (Some(old), None) => (old, What::Removed),
-            (Some(old), Some(new)) if old != new => (new, What::Changed),
-            _ => continue,
-        };
-        changes.push(Change::Setting {
-            config: config.clone(),
-            key: key.clone(),
-            value: values.join(", "),
-            what,
-        });
+    for config in configs {
+        let old = before.settings.get(config).unwrap_or(&empty);
+        let new = after.settings.get(config).unwrap_or(&empty);
+        let keys: BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+        for key in keys {
+            let (values, what) = match (old.get(key), new.get(key)) {
+                (None, Some(new)) => (new, What::New),
+                (Some(old), None) => (old, What::Removed),
+                (Some(old), Some(new)) if old != new => (new, What::Changed),
+                _ => continue,
+            };
+            changes.push(Change::Setting {
+                config: config.clone(),
+                key: key.clone(),
+                value: values.join(", "),
+                what,
+            });
+        }
     }
     changes
 }
 
-/// The warning for a list of changes, with the command that inspects the repository without
-/// running anything planted in it.
+/// The warning for a list of changes. It never suggests running git in the project: even
+/// `git status` runs a planted clean filter and `core.hooksPath=/dev/null` does not stop
+/// config-defined hooks (RFC 0001, experiments 6 and 7). Config is read as data from `/` with
+/// an absolute git and a cleared environment; hooks with `od`.
 pub(crate) fn report(project: &Path, when: &str, changes: &[Change]) -> String {
     let listed = changes
         .iter()
         .map(|change| format!("  {change}\n"))
         .collect::<Vec<_>>()
         .concat();
+    let config = changes
+        .iter()
+        .find_map(|change| match change {
+            Change::Setting { config, .. } => Some(config.clone()),
+            Change::File { .. } => None,
+        })
+        .unwrap_or_else(|| ".git/config".to_owned());
+    let project = escape(&project.display().to_string());
     format!(
         "warning: git files changed {when} in {project}:\n{listed}\
-         git runs these on your Mac. Review them before running git in this folder:\n  \
-         git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C {project} status",
-        project = project.display()
+         git on your Mac runs what these name, even from `git status`. Do not run git in this \
+         folder yet; read the files as data from outside it:\n  \
+         cd / && env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+         /usr/bin/git --no-pager config --file '{project}/{}' --no-includes --null --list | od -c\n  \
+         od -c '{project}/.git/hooks/<name>'\n\
+         See https://finngi.github.io/msbx/how-to/guard-git.html",
+        escape(&config)
     )
 }
 
@@ -459,8 +604,16 @@ mod tests {
         }
     }
 
+    /// Real git on a fixture: the hardened command, plus a home for `~` includes and the file
+    /// transport for submodules, which the hardened command turns off.
     fn git(dir: &Path, args: &[&str]) -> Result<()> {
-        let output = hostgit::command().current_dir(dir).args(args).output()?;
+        let output = hostgit::command()
+            .current_dir(dir)
+            .env("HOME", std::env::temp_dir())
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t.test"])
+            .args(args)
+            .output()?;
         anyhow::ensure!(
             output.status.success(),
             "git {args:?} failed: {}",
@@ -475,8 +628,8 @@ mod tests {
         Ok(temp)
     }
 
-    fn write_hook(project: &Path, name: &str, body: &str, executable: bool) -> Result<()> {
-        let hook = project.join(".git").join("hooks").join(name);
+    fn write_hook(dir: &Path, name: &str, body: &str, executable: bool) -> Result<()> {
+        let hook = dir.join("hooks").join(name);
         std::fs::write(&hook, body)?;
         let mode = if executable { 0o755 } else { 0o644 };
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode))?;
@@ -485,6 +638,13 @@ mod tests {
 
     fn rendered(changes: &[Change]) -> Vec<String> {
         changes.iter().map(ToString::to_string).collect()
+    }
+
+    fn listed(project: &Path, plan: &Plan) -> Vec<(String, bool)> {
+        plan.guards
+            .iter()
+            .map(|guard| (relative(project, &guard.path), guard.readonly))
+            .collect()
     }
 
     #[test]
@@ -507,7 +667,11 @@ mod tests {
         assert_eq!(
             repo(linked.path()),
             Some(Repo {
-                git_dir: linked.path().join("../elsewhere/.git/worktrees/x"),
+                git_dir: linked
+                    .path()
+                    .parent()
+                    .context("temp dir has a parent")?
+                    .join("elsewhere/.git/worktrees/x"),
                 gitfile: Some(gitfile.clone()),
             })
         );
@@ -531,6 +695,11 @@ mod tests {
         std::fs::create_dir_all(&husky)?;
         std::fs::write(git_dir.join("local.inc"), "[user]\n\tname = x\n")?;
         std::fs::write(project.join("outside.inc"), "")?;
+        std::fs::create_dir_all(git_dir.join("objects/info"))?;
+        std::fs::write(
+            git_dir.join("objects/info/alternates"),
+            "/elsewhere/objects\n",
+        )?;
         git(project, &["config", "core.hooksPath", ".husky/_"])?;
         git(project, &["config", "include.path", "local.inc"])?;
         git(
@@ -546,18 +715,16 @@ mod tests {
             &["config", "--add", "include.path", "../outside.inc"],
         )?;
 
-        let guards = mounts(project)?;
-        let listed: Vec<(String, bool)> = guards
-            .iter()
-            .map(|guard| (relative(project, &guard.path), guard.readonly))
-            .collect();
+        let plan = mounts(project)?;
+        assert_eq!(plan.notes, [] as [String; 0]);
         assert_eq!(
-            listed,
+            listed(project, &plan),
             [
                 (".git".to_owned(), false),
                 (".git/hooks".to_owned(), true),
                 (".git/info".to_owned(), true),
                 (".git/config".to_owned(), true),
+                (".git/objects/info/alternates".to_owned(), true),
                 (".husky/_".to_owned(), true),
                 (".git/local.inc".to_owned(), true),
                 ("outside.inc".to_owned(), true),
@@ -571,12 +738,81 @@ mod tests {
     }
 
     #[test]
-    fn mounts_are_empty_without_a_repo_or_with_git_data_elsewhere() -> Result<()> {
-        let plain = Temp::new("nomounts")?;
-        assert_eq!(mounts(plain.path())?, []);
+    fn mounts_guard_submodule_git_dirs_and_their_pointer_files() -> Result<()> {
+        let temp = Temp::new("submodule")?;
+        let upstream = temp.path().join("upstream");
+        std::fs::create_dir(&upstream)?;
+        git(&upstream, &["init", "-q"])?;
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "init"])?;
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project)?;
+        git(&project, &["init", "-q"])?;
+        git(
+            &project,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                upstream.to_str().context("utf-8 path")?,
+                "lib/dep",
+            ],
+        )?;
+        let module = project.join(".git/modules/lib/dep");
+        assert!(
+            module.join("HEAD").is_file(),
+            "git put the module under modules/"
+        );
+
+        let plan = mounts(&project)?;
+        let guards = listed(&project, &plan);
+        for expected in [
+            (".git".to_owned(), false),
+            (".git/modules/lib/dep".to_owned(), false),
+            (".git/modules/lib/dep/hooks".to_owned(), true),
+            (".git/modules/lib/dep/info".to_owned(), true),
+            (".git/modules/lib/dep/config".to_owned(), true),
+            ("lib/dep/.git".to_owned(), true),
+        ] {
+            assert!(guards.contains(&expected), "{expected:?} in {guards:?}");
+        }
+
+        let before = snapshot(&project, None)?;
+        assert!(before.settings.contains_key(".git/modules/lib/dep/config"));
+        write_hook(&module, "pre-commit", "evil", true)?;
+        std::fs::write(project.join("lib/dep/.git"), "gitdir: /tmp/evil\n")?;
+        git(
+            &module,
+            &["config", "--file", "config", "core.fsmonitor", "evil"],
+        )?;
+        let after = snapshot(&project, Some(&before))?;
+        assert_eq!(
+            rendered(&changes(&before, &after)),
+            [
+                ".git/modules/lib/dep/config (changed)",
+                ".git/modules/lib/dep/hooks/pre-commit (new)",
+                "lib/dep/.git (changed)",
+                ".git/modules/lib/dep/config: core.fsmonitor = evil (new)",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mounts_are_empty_without_a_repo_and_noted_with_git_data_elsewhere() -> Result<()> {
+        let no_repo = Temp::new("nomounts")?;
+        assert_eq!(mounts(no_repo.path())?, Plan::default());
         let linked = Temp::new("linkedmounts")?;
         std::fs::write(linked.path().join(".git"), "gitdir: /tmp\n")?;
-        assert_eq!(mounts(linked.path())?, []);
+        let plan = mounts(linked.path())?;
+        assert_eq!(plan.guards, []);
+        assert_eq!(plan.notes.len(), 1);
+        assert!(
+            plan.notes[0].starts_with("note: the git data of ") && plan.notes[0].contains("/tmp"),
+            "{}",
+            plan.notes[0]
+        );
         Ok(())
     }
 
@@ -584,17 +820,18 @@ mod tests {
     fn changes_list_hooks_settings_and_the_git_pointer() -> Result<()> {
         let temp = init_repo("changes")?;
         let project = temp.path();
-        write_hook(project, "pre-push", "#!/bin/sh\n", false)?;
+        let git_dir = project.join(".git");
+        write_hook(&git_dir, "pre-push", "#!/bin/sh\n", false)?;
         let before = snapshot(project, None)?;
-        assert_eq!(before.config.as_deref(), Some(".git/config"));
-        assert!(before.settings.is_empty(), "{:?}", before.settings);
+        assert_eq!(before.settings.keys().collect::<Vec<_>>(), [".git/config"]);
+        assert!(before.settings[".git/config"].is_empty());
         assert_eq!(changes(&before, &snapshot(project, Some(&before))?), []);
 
-        write_hook(project, "pre-commit", "#!/bin/sh\nevil\n", true)?;
-        write_hook(project, "pre-push", "#!/bin/sh\n", true)?;
-        std::fs::remove_file(project.join(".git/hooks/pre-rebase.sample"))?;
+        write_hook(&git_dir, "pre-commit", "#!/bin/sh\nevil\n", true)?;
+        write_hook(&git_dir, "pre-push", "#!/bin/sh\n", true)?;
+        std::fs::remove_file(git_dir.join("hooks/pre-rebase.sample"))?;
         git(project, &["config", "core.fsmonitor", "./tools/watch.sh"])?;
-        std::fs::write(project.join(".git/info/attributes"), "* filter=x\n")?;
+        std::fs::write(git_dir.join("info/attributes"), "* filter=x\n")?;
         let after = snapshot(project, Some(&before))?;
         assert_eq!(
             rendered(&changes(&before, &after)),
@@ -672,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn report_lists_changes_and_the_safe_command() {
+    fn report_reads_files_as_data_and_never_suggests_git_status() {
         let changes = [
             Change::File {
                 path: ".git/hooks/pre-commit".to_owned(),
@@ -685,18 +922,53 @@ mod tests {
                 what: What::New,
             },
         ];
-        assert_eq!(
-            report(
-                Path::new("/Users/you/dev/app"),
-                "during this session",
-                &changes
-            ),
-            "warning: git files changed during this session in /Users/you/dev/app:\n  \
-             .git/hooks/pre-commit (new)\n  \
-             .git/config: core.fsmonitor = ./tools/watch.sh (new)\n\
-             git runs these on your Mac. Review them before running git in this folder:\n  \
-             git -c core.hooksPath=/dev/null -c core.fsmonitor=false -C /Users/you/dev/app status"
+        let text = report(
+            Path::new("/Users/you/dev/app"),
+            "during this session",
+            &changes,
         );
+        assert!(
+            text.starts_with(
+                "warning: git files changed during this session in /Users/you/dev/app:\n  \
+                 .git/hooks/pre-commit (new)\n  \
+                 .git/config: core.fsmonitor = ./tools/watch.sh (new)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "cd / && env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+                 /usr/bin/git --no-pager config --file '/Users/you/dev/app/.git/config' \
+                 --no-includes --null --list | od -c"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("od -c '/Users/you/dev/app/.git/hooks/<name>'"),
+            "{text}"
+        );
+        // No runnable git command on the project: not even the old `-c ... status` form.
+        for forbidden in ["-C /Users", "git -c", " status\n", "diff", "checkout"] {
+            assert!(!text.contains(forbidden), "{forbidden} in {text}");
+        }
+    }
+
+    #[test]
+    fn control_characters_in_names_are_escaped() {
+        let change = Change::Setting {
+            config: ".git/config".to_owned(),
+            key: "alias.x".to_owned(),
+            value: "!evil\n\u{1b}[2J".to_owned(),
+            what: What::New,
+        };
+        assert_eq!(
+            change.to_string(),
+            ".git/config: alias.x = !evil\\n\\u{1b}[2J (new)"
+        );
+        let text = report(Path::new("/tmp/p\u{7}"), "now", &[change]);
+        assert!(text.lines().all(|line| !line.chars().any(char::is_control)));
+        assert!(text.contains("/tmp/p\\u{7}"), "{text}");
+        assert_eq!(escape("plain/path"), "plain/path");
     }
 
     #[test]
@@ -716,7 +988,7 @@ mod tests {
             "the first session has nothing to compare with"
         );
         assert_eq!(first.finish()?, None);
-        write_hook(project, "pre-commit", "evil", true)?;
+        write_hook(&project.join(".git"), "pre-commit", "evil", true)?;
         let during = first.finish()?.context("a planted hook is reported")?;
         assert!(during.starts_with("warning: git files changed during this session in"));
         assert!(
@@ -740,6 +1012,10 @@ mod tests {
 
         let stored = std::fs::read_to_string(dirs.git_guard_dir().join("box.json"))?;
         assert!(stored.contains("pre-commit"), "{stored}");
+        assert!(
+            !stored.contains("repositoryformatversion"),
+            "no file contents are stored"
+        );
         Ok(())
     }
 }

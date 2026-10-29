@@ -10,7 +10,7 @@ policy, which the proxy applies live (see [Control network access](../how-to/con
 | Name | `<agent>-<folder>` by default; editable in the dashboard wizard. The CLI keeps its generated name; see [Commands](commands.md#msbx-agent). |
 | Image | `node:24-bookworm-slim` |
 | Mount | The project folder, read-write, at the same absolute path as on the host |
-| Git guard | When the project has a `.git` directory: `.git` mounted read-write at the same path, and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree` (if present), a `.git` pointer file, and `core.hooksPath` or `include.path` targets inside the project mounted read-only ([RFC 0001](../rfcs/0001-git-safety.md)). `hooks` and `info` are created when missing. |
+| Git guard | When the project has a `.git` directory: `.git` mounted read-write at the same path, and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree` and `.git/objects/info/alternates` (if present), a `.git` pointer file, and `core.hooksPath` or `include.path` targets inside the project mounted read-only; the same for each submodule git dir under `.git/modules` and its `.git` pointer file ([RFC 0001](../rfcs/0001-git-safety.md)). `hooks` and `info` are created when missing. A linked worktree or submodule checkout gets no guard and a `note:`. |
 | User | `node` (uid 1000 in the image); the first-use install runs as root |
 | Security profile | `restricted`: `no_new_privs`, no `CAP_SYS_ADMIN`, so nobody in the VM can unmount the guards or use `sudo` |
 | Working directory | The project folder |
