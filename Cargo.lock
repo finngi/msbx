@@ -3137,6 +3137,7 @@ dependencies = [
  "futures",
  "insta",
  "microsandbox",
+ "microsandbox-types",
  "ratatui",
  "tokio",
 ]
