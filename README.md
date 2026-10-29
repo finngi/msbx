@@ -113,7 +113,7 @@ msbx adds no isolation of its own. Isolation is provided by microsandbox; read i
 What microsandbox isolates:
 
 - Each sandbox is a separate microVM with its own kernel.
-- Only the project folder is mounted from the host. The VM sees nothing else on your filesystem.
+- Only the project folder is mounted from the host filesystem.
 - API keys stay on the host. The VM sees a placeholder, which microsandbox replaces with the real key only on requests to the allowed host.
 
 What it leaves open:
