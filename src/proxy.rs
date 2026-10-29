@@ -15,7 +15,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::time::{Instant, interval, timeout, timeout_at};
 
 use crate::netlog::Log;
@@ -29,7 +29,11 @@ pub(crate) const ADDRESS: &str = "127.0.0.1:47447";
 pub(crate) const TOKEN_VAR: &str = "MSBX_PROXY_TOKEN";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const MAX_CONNECTIONS: usize = 512;
+/// Requests being read at once (CONNECT heads, status, stop, reload). Kept apart from the
+/// tunnel limit so control requests still get through when every tunnel slot is busy.
+const MAX_PENDING: usize = 512;
+const SERVICE_UNAVAILABLE: &[u8] =
+    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long to wait for the guest's first bytes; server-first protocols send none.
 const SNIFF_TIMEOUT: Duration = Duration::from_secs(2);
@@ -44,11 +48,13 @@ const UNAUTHORISED: &[u8] = b"HTTP/1.1 407 Proxy Authentication Required\r\n\
 const BAD_REQUEST: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
-/// How often the proxy looks for policy changes and flushes the log. Injected so tests run fast.
+/// How often the proxy looks for policy changes and flushes the log, and how many tunnels it
+/// keeps open at once. Injected so tests run fast and can fill every tunnel slot.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Timing {
     pub(crate) reload: Duration,
     pub(crate) flush: Duration,
+    pub(crate) max_tunnels: usize,
 }
 
 impl Default for Timing {
@@ -56,6 +62,7 @@ impl Default for Timing {
         Self {
             reload: Duration::from_secs(1),
             flush: Duration::from_secs(2),
+            max_tunnels: 512,
         }
     }
 }
@@ -72,6 +79,9 @@ struct Shared {
     token: String,
     policy_path: PathBuf,
     policy: watch::Receiver<Arc<Policy>>,
+    /// Also held by the reload loop; an authenticated reload request replaces the policy now.
+    policy_tx: Arc<watch::Sender<Arc<Policy>>>,
+    tunnels: Arc<Semaphore>,
     log: mpsc::Sender<Event>,
     shutdown: watch::Sender<bool>,
 }
@@ -155,9 +165,14 @@ pub(crate) async fn serve_on(listener: TcpListener, dirs: Dirs, timing: Timing) 
         }
     };
     let (policy_tx, policy_rx) = watch::channel(Arc::new(initial));
+    let policy_tx = Arc::new(policy_tx);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let (log_tx, log_rx) = mpsc::channel(1024);
-    let reloader = tokio::spawn(reload_loop(policy_path.clone(), policy_tx, timing.reload));
+    let reloader = tokio::spawn(reload_loop(
+        policy_path.clone(),
+        policy_tx.clone(),
+        timing.reload,
+    ));
     let logger = tokio::spawn(log_loop(
         dirs.network_log(),
         log_rx,
@@ -168,10 +183,12 @@ pub(crate) async fn serve_on(listener: TcpListener, dirs: Dirs, timing: Timing) 
         token,
         policy_path,
         policy: policy_rx,
+        policy_tx,
+        tunnels: Arc::new(Semaphore::new(timing.max_tunnels)),
         log: log_tx,
         shutdown: shutdown_tx,
     });
-    let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let pending = Arc::new(Semaphore::new(MAX_PENDING));
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("listening for SIGTERM")?;
@@ -181,12 +198,14 @@ pub(crate) async fn serve_on(listener: TcpListener, dirs: Dirs, timing: Timing) 
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accepting a proxy connection")?;
-                let permit = limit.clone().acquire_owned().await.context("connection limit closed")?;
+                // Never wait here: a full queue drops the newcomer instead of stalling accept.
+                let Ok(permit) = pending.clone().try_acquire_owned() else {
+                    continue;
+                };
                 let shared = shared.clone();
                 tokio::spawn(async move {
-                    let _permit = permit;
                     // A failed connection only concerns that guest; the proxy carries on.
-                    let _ = handle(stream, shared).await;
+                    let _ = handle(stream, shared, permit).await;
                 });
             }
             _ = shutdown_rx.changed() => break,
@@ -209,9 +228,10 @@ async fn terminate_signal(_: &mut ()) {
     std::future::pending::<()>().await;
 }
 
-/// Reloads `policy.toml` when its modification time or size changes. A file that fails to
-/// parse keeps the last good policy and logs a warning.
-async fn reload_loop(path: PathBuf, policy: watch::Sender<Arc<Policy>>, every: Duration) {
+/// Reloads `policy.toml` when its modification time or size changes, which catches hand
+/// edits. msbx's own edits also ask for a reload at once (`reload`). A file that fails to parse
+/// keeps the last good policy and logs a warning.
+async fn reload_loop(path: PathBuf, policy: Arc<watch::Sender<Arc<Policy>>>, every: Duration) {
     let mut last = stamp(&path).await;
     let mut ticks = interval(every);
     loop {
@@ -221,17 +241,22 @@ async fn reload_loop(path: PathBuf, policy: watch::Sender<Arc<Policy>>, every: D
             continue;
         }
         last = current;
-        let reload_path = path.clone();
-        let loaded = tokio::task::spawn_blocking(move || policy::load(&reload_path)).await;
-        match loaded {
-            Ok(Ok(Some(fresh))) => {
-                policy.send_replace(Arc::new(fresh));
-            }
-            Ok(Ok(None)) => {}
-            Ok(Err(error)) => eprintln!("warning: {error:#}; keeping the previous policy"),
-            Err(error) => eprintln!("warning: reloading the policy: {error}"),
+        if let Err(error) = load_into(&path, &policy).await {
+            eprintln!("warning: {error:#}; keeping the previous policy");
         }
     }
+}
+
+/// Reads `policy.toml` and makes it the live policy. A missing file keeps the current one.
+async fn load_into(path: &Path, policy: &watch::Sender<Arc<Policy>>) -> Result<()> {
+    let path = path.to_path_buf();
+    let loaded = tokio::task::spawn_blocking(move || policy::load(&path))
+        .await
+        .context("reloading the policy")??;
+    if let Some(fresh) = loaded {
+        policy.send_replace(Arc::new(fresh));
+    }
+    Ok(())
 }
 
 async fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
@@ -293,7 +318,11 @@ fn now() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
+async fn handle(
+    mut stream: TcpStream,
+    shared: Arc<Shared>,
+    pending: OwnedSemaphorePermit,
+) -> Result<()> {
     let head = timeout(HEAD_TIMEOUT, read_head(&mut stream))
         .await
         .context("waiting for the request head")??;
@@ -302,6 +331,14 @@ async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
             let Some(auth) = auth.filter(|auth| same(&auth.password, &shared.token)) else {
                 return stream.write_all(UNAUTHORISED).await.context("writing 407");
             };
+            let Ok(_tunnel) = shared.tunnels.clone().try_acquire_owned() else {
+                return stream
+                    .write_all(SERVICE_UNAVAILABLE)
+                    .await
+                    .context("writing 503");
+            };
+            // The tunnel now counts against the tunnel limit, not the pending one.
+            drop(pending);
             tunnel(stream, target, auth.user, &shared).await
         }
         Ok(Request::Status) => {
@@ -331,6 +368,22 @@ async fn handle(mut stream: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 .context("writing the stop reply")?;
             shared.shutdown.send_replace(true);
             Ok(())
+        }
+        Ok(Request::Reload { auth }) => {
+            if !auth.is_some_and(|auth| same(&auth.password, &shared.token)) {
+                return stream.write_all(UNAUTHORISED).await.context("writing 407");
+            }
+            let reply: &[u8] = match load_into(&shared.policy_path, &shared.policy_tx).await {
+                Ok(()) => b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                Err(error) => {
+                    eprintln!("warning: {error:#}; keeping the previous policy");
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                }
+            };
+            stream
+                .write_all(reply)
+                .await
+                .context("writing the reload reply")
         }
         Ok(Request::Other) | Err(_) => stream.write_all(BAD_REQUEST).await.context("writing 400"),
     }
@@ -512,6 +565,37 @@ pub(crate) async fn stop(dirs: &Dirs) -> Result<()> {
         eprintln!("no msbx proxy is running on {ADDRESS}");
         return Ok(());
     };
+    let reply = authed_post(dirs, wire::STOP_PATH).await?;
+    ensure!(
+        reply.starts_with("HTTP/1.1 200"),
+        "the proxy (pid {}) refused the stop request: {}",
+        running.pid,
+        reply.lines().next().unwrap_or_default()
+    );
+    eprintln!("stopped msbx proxy {} (pid {})", running.msbx, running.pid);
+    Ok(())
+}
+
+/// Asks a running proxy to re-read `policy.toml` now, so an edit applies to the very next
+/// connection. Nothing to do when no proxy runs (it reads the file when it starts), or when the
+/// running proxy serves a different policy file (another `XDG_CONFIG_HOME`).
+pub(crate) async fn reload(dirs: &Dirs) -> Result<()> {
+    match status().await? {
+        Some(running) if running.policy == dirs.policy_file() => {}
+        _ => return Ok(()),
+    }
+    let reply = authed_post(dirs, wire::RELOAD_PATH).await?;
+    ensure!(
+        reply.starts_with("HTTP/1.1 200"),
+        "the proxy could not reload {}; it keeps the previous policy (see {})",
+        dirs.policy_file().display(),
+        dirs.proxy_log().display()
+    );
+    Ok(())
+}
+
+/// Sends `POST path` with the proxy token as the Basic password and returns the whole reply.
+async fn authed_post(dirs: &Dirs, path: &str) -> Result<String> {
     let token = token(dirs)?;
     let address: SocketAddr = ADDRESS.parse().context("parsing the proxy address")?;
     let stream = timeout(PROBE_TIMEOUT, TcpStream::connect(address))
@@ -523,18 +607,9 @@ pub(crate) async fn stop(dirs: &Dirs) -> Result<()> {
         format!(":{token}"),
     );
     let request = format!(
-        "POST {} HTTP/1.1\r\nHost: {address}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n",
-        wire::STOP_PATH
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nProxy-Authorization: Basic {credentials}\r\n\r\n"
     );
-    let reply = exchange(stream, request.as_bytes()).await?;
-    ensure!(
-        reply.starts_with("HTTP/1.1 200"),
-        "the proxy (pid {}) refused the stop request: {}",
-        running.pid,
-        reply.lines().next().unwrap_or_default()
-    );
-    eprintln!("stopped msbx proxy {} (pid {})", running.msbx, running.pid);
-    Ok(())
+    exchange(stream, request.as_bytes()).await
 }
 
 /// Makes sure a proxy answers on the port, starting a detached `msbx proxy serve` if needed.
@@ -705,6 +780,96 @@ mod tests {
         exchange(stream, request.as_bytes()).await
     }
 
+    async fn reload_at(proxy: SocketAddr, token: &str) -> Result<String> {
+        let stream = TcpStream::connect(proxy).await?;
+        let request = format!(
+            "POST {} HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            wire::RELOAD_PATH,
+            basic("", token)
+        );
+        exchange(stream, request.as_bytes()).await
+    }
+
+    /// msbx's own edits must not wait for the file check: a reload request applies the policy
+    /// before it replies, so the very next connection follows it.
+    #[tokio::test]
+    async fn reload_request_applies_an_edit_before_replying() -> Result<()> {
+        let fixture = Fixture::new("reload")?;
+        let target = echo_server().await?;
+        fixture.write_policy(&[])?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let proxy = listener.local_addr()?;
+        // A file check far in the future, so only the reload request can apply the edit.
+        let timing = Timing {
+            reload: Duration::from_secs(3600),
+            flush: Duration::from_millis(20),
+            ..Timing::default()
+        };
+        let server = tokio::spawn(serve_on(listener, fixture.dirs.clone(), timing));
+        status_at(proxy).await?.context("status missing")?;
+
+        let (stream, _) = connect(proxy, target, Some(("box", "test-token"))).await?;
+        assert!(!relays(stream).await?, "blocked before the edit");
+        fixture.write_policy(&[target.to_string()])?;
+        assert!(reload_at(proxy, "wrong").await?.starts_with("HTTP/1.1 407"));
+        assert!(
+            reload_at(proxy, "test-token")
+                .await?
+                .starts_with("HTTP/1.1 200")
+        );
+        let (stream, _) = connect(proxy, target, Some(("box", "test-token"))).await?;
+        assert!(
+            relays(stream).await?,
+            "allowed right after the reload reply"
+        );
+
+        assert!(
+            stop_at(proxy, "test-token")
+                .await?
+                .starts_with("HTTP/1.1 200")
+        );
+        server.await??;
+        Ok(())
+    }
+
+    /// With every tunnel slot taken, new tunnels get 503 but status, reload and stop still
+    /// answer, so `ensure_running` never mistakes a busy proxy for a missing one.
+    #[tokio::test]
+    async fn control_requests_answer_when_every_tunnel_is_busy() -> Result<()> {
+        let fixture = Fixture::new("busy")?;
+        let target = echo_server().await?;
+        fixture.write_policy(&[target.to_string()])?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let proxy = listener.local_addr()?;
+        let timing = Timing {
+            max_tunnels: 1,
+            ..Timing::default()
+        };
+        let server = tokio::spawn(serve_on(listener, fixture.dirs.clone(), timing));
+        status_at(proxy).await?.context("status missing")?;
+
+        let (mut busy, line) = connect(proxy, target, Some(("box", "test-token"))).await?;
+        assert_eq!(line, "HTTP/1.1 200 Connection established");
+        busy.write_all(b"ping").await?;
+        let (_, line) = connect(proxy, target, Some(("box", "test-token"))).await?;
+        assert_eq!(line, "HTTP/1.1 503 Service Unavailable");
+        status_at(proxy).await?.context("status while busy")?;
+        assert!(
+            reload_at(proxy, "test-token")
+                .await?
+                .starts_with("HTTP/1.1 200")
+        );
+
+        drop(busy);
+        assert!(
+            stop_at(proxy, "test-token")
+                .await?
+                .starts_with("HTTP/1.1 200")
+        );
+        server.await??;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn proxy_authenticates_decides_relays_reloads_and_logs() -> Result<()> {
         let fixture = Fixture::new("relay")?;
@@ -716,6 +881,7 @@ mod tests {
         let timing = Timing {
             reload: Duration::from_millis(20),
             flush: Duration::from_millis(20),
+            ..Timing::default()
         };
         let server = tokio::spawn(serve_on(listener, fixture.dirs.clone(), timing));
 

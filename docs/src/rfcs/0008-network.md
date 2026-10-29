@@ -66,7 +66,7 @@ policy balanced · ↓ 48M  ↑ 3.1M · 2 blocked
 ▸ ✓ api.openai.com:443         42  12:04:50
 ```
 
-`←`/`→` move the cursor, `a` allows the host for this sandbox, `A` everywhere, `d` denies it here, `p` picks a preset. Each key writes `policy.toml`; the proxy applies it within a second. The Overview's network row reads `policy balanced (proxied)` and a `traffic` row shows bytes in and out. Sandboxes created before this feature show `created before network policy; recreate with msb rm -f NAME`.
+`←`/`→` move the cursor, `a` allows the host for this sandbox, `A` everywhere, `d` denies it here, `p` picks a preset. Each key writes `policy.toml` and asks the proxy to reload it, so the next connection follows the change. The Overview's network row reads `policy balanced (proxied)` and a `traffic` row shows bytes in and out. Sandboxes created before this feature show `created before network policy; recreate with msb rm -f NAME`.
 
 ## Reference-level explanation
 
@@ -109,7 +109,7 @@ New sandboxes get the label `msbx.network=proxy`, the proxy `http_connect("127.0
 5. Anti-spoofing: resolve the name on the host (`tokio::net::lookup_host`, 1.5 s). The name counts only when the CONNECT address is among the answers; otherwise the decision is on the IP alone and the log rule ends in `(name-mismatch <name>)`.
 6. Decide with the current policy, log, then either connect to the CONNECT address (never a re-resolved one), write the buffered bytes and `tokio::io::copy_bidirectional`, or close the guest side.
 
-A semaphore caps concurrent connections at 512. The policy file is re-read when its modification time or size changes, checked once a second; a file that fails to parse keeps the last good policy and logs a warning. The log aggregates per (sandbox, host or IP, port, decision, rule) with count and first/last seen, capped at 5,000 rows, flushed atomically to `network-log.json` every 2 s when it changed and at shutdown.
+At most 512 tunnels are open at once; past that, new tunnels get `503`. Requests still being read have their own limit, so status, reload and stop always get through. msbx's own edits (`msbx policy`, the TUI keys) send an authenticated reload request, and the proxy applies the file before it replies. Hand edits are picked up when the file's modification time or size changes, checked once a second. A file that fails to parse keeps the last good policy and logs a warning. The log aggregates per (sandbox, host or IP, port, decision, rule) with count and first/last seen, capped at 5,000 rows, flushed atomically to `network-log.json` every 2 s when it changed and at shutdown.
 
 ### Lifecycle
 

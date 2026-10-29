@@ -135,6 +135,20 @@ enum PolicyAction {
     Preset { preset: Preset },
 }
 
+impl PolicyAction {
+    /// Whether the action changes policy.toml, so the running proxy must reload it.
+    fn writes(&self) -> bool {
+        matches!(
+            self,
+            Self::Init { .. }
+                | Self::Allow { .. }
+                | Self::Deny { .. }
+                | Self::Rm { .. }
+                | Self::Preset { .. }
+        )
+    }
+}
+
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 enum ProxyAction {
     /// Run the proxy in the foreground on 127.0.0.1:47447.
@@ -188,7 +202,15 @@ async fn run(cli: Cli) -> Result<u8> {
         }
         Some(Command::Secret(SecretAction::Set { var })) => secrets::set(&var),
         Some(Command::Secret(SecretAction::Rm { var })) => secrets::rm(&var),
-        Some(Command::Policy(action)) => run_policy(action, &dirs),
+        Some(Command::Policy(action)) => {
+            let writes = action.writes();
+            let code = run_policy(action, &dirs)?;
+            if writes {
+                // Apply the edit before returning, not on the proxy's next file check.
+                proxy::reload(&dirs).await?;
+            }
+            Ok(code)
+        }
         Some(Command::Proxy(ProxyAction::Serve)) => proxy::serve(dirs).await.map(|()| 0),
         Some(Command::Proxy(ProxyAction::Status)) => match proxy::status().await? {
             Some(status) => policy_cli::emit(&format!(

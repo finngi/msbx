@@ -712,6 +712,7 @@ mod tests {
         let timing = proxy::Timing {
             reload: Duration::from_millis(200),
             flush: Duration::from_millis(200),
+            ..proxy::Timing::default()
         };
         Ok(tokio::spawn(proxy::serve_on(
             listener,

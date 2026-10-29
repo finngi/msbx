@@ -15,6 +15,8 @@ pub(crate) const MAX_HEAD: usize = 8 * 1024;
 pub(crate) const STATUS_PATH: &str = "/msbx-status";
 /// Path of the authenticated stop request.
 pub(crate) const STOP_PATH: &str = "/msbx-stop";
+/// Path of the authenticated request that makes the proxy re-read `policy.toml` now.
+pub(crate) const RELOAD_PATH: &str = "/msbx-reload";
 
 /// `Proxy-Authorization: Basic` credentials, decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,10 @@ pub(crate) enum Request {
     Status,
     /// `POST /msbx-stop` with the proxy token as the Basic password.
     Stop {
+        auth: Option<Basic>,
+    },
+    /// `POST /msbx-reload` with the proxy token as the Basic password.
+    Reload {
         auth: Option<Basic>,
     },
     Other,
@@ -74,6 +80,7 @@ pub(crate) fn parse_request(head: &[u8]) -> Result<Request> {
         },
         ("GET", STATUS_PATH) => Request::Status,
         ("POST", STOP_PATH) => Request::Stop { auth },
+        ("POST", RELOAD_PATH) => Request::Reload { auth },
         _ => Request::Other,
     })
 }
@@ -430,6 +437,23 @@ mod tests {
                     password: "secret".to_owned()
                 })
             }
+        );
+        let reload = format!(
+            "POST /msbx-reload HTTP/1.1\r\nProxy-Authorization: Basic {}\r\n\r\n",
+            basic("", "secret")
+        );
+        assert_eq!(
+            parse_request(reload.as_bytes())?,
+            Request::Reload {
+                auth: Some(Basic {
+                    user: String::new(),
+                    password: "secret".to_owned()
+                })
+            }
+        );
+        assert_eq!(
+            parse_request(b"POST /msbx-reload HTTP/1.1\r\n\r\n")?,
+            Request::Reload { auth: None }
         );
         assert_eq!(parse_request(b"GET / HTTP/1.1\r\n\r\n")?, Request::Other);
         assert_eq!(

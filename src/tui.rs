@@ -220,7 +220,7 @@ async fn live(
                             }
                             tokio::spawn(run_job(job, sender.clone(), dirs.clone()));
                         }
-                        Ok(Step::Policy(edit)) => edit_policy(app, dirs, edit),
+                        Ok(Step::Policy(edit)) => edit_policy(app, dirs, edit).await,
                         Err(error) => app.status_line = Some(format!("{error:#}")),
                     }
                 }
@@ -264,9 +264,9 @@ fn step(action: Action, sandboxes: &[SandboxInfo]) -> Result<Step> {
     })
 }
 
-/// Applies a policy edit at once (a tiny file write) and reports it on the status line. The
-/// proxy picks the change up within a second; the Network tab's preset updates right away.
-fn edit_policy(app: &mut App, dirs: &Dirs, edit: Edit) {
+/// Applies a policy edit at once (a tiny file write), asks the proxy to reload it, and reports
+/// it on the status line. The Network tab's preset updates right away.
+async fn edit_policy(app: &mut App, dirs: &Dirs, edit: Edit) {
     let then_create = matches!(
         edit,
         Edit::Preset {
@@ -280,7 +280,10 @@ fn edit_policy(app: &mut App, dirs: &Dirs, edit: Edit) {
     };
     match apply_edit(dirs, edit) {
         Ok(status) => {
-            app.status_line = Some(status);
+            app.status_line = Some(match proxy::reload(dirs).await {
+                Ok(()) => status,
+                Err(error) => format!("{status}; {error:#}"),
+            });
             if let Some(preset) = preset {
                 app.policy = Some(preset);
             }
@@ -602,8 +605,8 @@ mod tests {
         outcome
     }
 
-    #[test]
-    fn edit_policy_opens_create_after_the_first_preset() -> Result<()> {
+    #[tokio::test]
+    async fn edit_policy_opens_create_after_the_first_preset() -> Result<()> {
         let root = std::env::temp_dir().join(format!("msbx-tui-first-{}", std::process::id()));
         let dirs = Dirs {
             config: root.join("config"),
@@ -617,7 +620,8 @@ mod tests {
                 preset: Preset::Balanced,
                 then_create: true,
             },
-        );
+        )
+        .await;
         let first = (app.policy, app.popup.clone(), app.status_line.clone());
         app.popup = None;
         edit_policy(
@@ -627,7 +631,8 @@ mod tests {
                 target: name("*.com"),
                 sandbox: None,
             },
-        );
+        )
+        .await;
         let second = (app.popup.clone(), app.status_line.clone());
         if root.exists() {
             std::fs::remove_dir_all(&root)?;
