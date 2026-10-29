@@ -62,6 +62,11 @@ impl Dirs {
     pub(crate) fn proxy_log(&self) -> PathBuf {
         self.state.join("proxy.log")
     }
+
+    /// Per-sandbox fingerprints of the project's git files (RFC 0001).
+    pub(crate) fn git_guard_dir(&self) -> PathBuf {
+        self.state.join("git-guard")
+    }
 }
 
 /// Writes `bytes` to `path` with mode 600 through a temporary file in the same directory and a
@@ -139,6 +144,7 @@ mod tests {
             PathBuf::from("/var/x/msbx/network-log.json")
         );
         assert_eq!(dirs.proxy_log(), PathBuf::from("/var/x/msbx/proxy.log"));
+        assert_eq!(dirs.git_guard_dir(), PathBuf::from("/var/x/msbx/git-guard"));
         Ok(())
     }
 

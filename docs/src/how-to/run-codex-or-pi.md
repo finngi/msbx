@@ -42,8 +42,9 @@ part of the sandbox settings, so [remove the sandbox](remove-or-reset.md) and ru
 2. Run `msbx agent codex -- login --device-auth` and enter the code it shows.
 3. Run `msbx agent codex` in any project. It starts signed in.
 
-The sign-in file, `/root/.codex/auth.json` in the VM, is a link to the `msbx-login-codex`
-volume, which every Codex sandbox mounts at `/root/.msbx-login`. A token refresh in one sandbox
+The sign-in file, `~/.codex/auth.json` in the VM (the agent runs as `node`, so
+`/home/node/.codex/auth.json`), is a link to the `msbx-login-codex` volume, which every Codex
+sandbox mounts at `~/.msbx-login`. A token refresh in one sandbox
 is seen by all of them, and the login survives `msb rm`. To sign out everywhere, stop the Codex
 sandboxes and run `msbx volume rm msbx-login-codex`.
 

@@ -41,17 +41,24 @@ Behaviour:
    characters outside `a-z0-9` becomes one `-`, and the name is cut to 128 bytes.
 3. If a sandbox with that name exists for the same folder, it is started if needed and reused.
    If it exists for a different folder, or was not created by msbx, msbx stops with an error.
-4. Otherwise it is created with the [sandbox defaults](sandbox-defaults.md), including the proxy.
-5. On first use the agent is installed in the VM (a marker file, `/root/.msbx-installed`, records
-   that it is done).
+4. Otherwise it is created with the [sandbox defaults](sandbox-defaults.md), including the proxy
+   and the git guard mounts.
+5. On first use the agent is installed in the VM as root (a marker file, `/root/.msbx-installed`,
+   records that it is done). A sandbox created before the git guard gets a `note:` saying the
+   agent runs as root there.
 6. For `codex` and `pi`, the agent's sign-in file is linked to the volume `msbx-login-<agent>`,
-   mounted at `/root/.msbx-login` (created when missing, 16 MiB, `noexec`). A plain file the
-   agent left at that path is moved onto the volume first. A sandbox created without the volume
-   gets a `note:` and no link.
-7. For `pi`, `/root/.pi/agent/models.json` is written from the host's local model servers (see
-   [Reach Ollama or LM Studio](../how-to/reach-host-models.md)).
-8. msbx runs `msb exec -t <name> -- <command> <ARGS>` on your terminal and exits with its exit
-   code.
+   mounted at `~/.msbx-login` in the agent user's home (created when missing, 16 MiB,
+   `noexec`). A plain file the agent left at that path is moved onto the volume first. A
+   sandbox created without the volume gets a `note:` and no link.
+7. For `pi`, `~/.pi/agent/models.json` is written from the host's local model servers (see
+   [Reach Ollama or LM Studio](../how-to/reach-host-models.md)). The VM's global git identity
+   is set from your Mac's when it has none.
+8. msbx fingerprints the project's git hooks, config and pointer files, warns if they changed
+   since the last session started, and stores the new baseline under
+   `~/.local/state/msbx/git-guard/<name>.json` ([Keep git safe](../how-to/guard-git.md)).
+9. msbx runs `msb exec -t <name> -- <command> <ARGS>` on your terminal, as the sandbox's user
+   (`node` in new sandboxes), and exits with its exit code. First it prints a warning if the
+   git files changed during the session.
 
 Before step 1, msbx runs itself again once with the proxy token (`MSBX_PROXY_TOKEN`) and, on
 macOS, each agent secret that is unset or empty in the environment and present in the Keychain
@@ -59,8 +66,8 @@ macOS, each agent secret that is unset or empty in the environment and present i
 
 | Agent | Command in the VM | Installed on first use | Host-side secret | Shared sign-in file |
 |---|---|---|---|---|
-| `codex` | `codex` | `@openai/codex@0.148.0`, `git`, `ca-certificates` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `/root/.codex/auth.json` |
-| `pi` | `pi` | `@earendil-works/pi-coding-agent@1.4.0`, `git`, `ca-certificates` | none | `/root/.pi/agent/auth.json` |
+| `codex` | `codex` | `@openai/codex@0.148.0`, `git`, `ca-certificates` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `~/.codex/auth.json` |
+| `pi` | `pi` | `@earendil-works/pi-coding-agent@1.4.0`, `git`, `ca-certificates` | none | `~/.pi/agent/auth.json` |
 | `shell` | `bash` | `git`, `curl`, `ca-certificates` | none | none |
 
 ## `msbx secret`

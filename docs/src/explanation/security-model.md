@@ -85,22 +85,38 @@ Codex and pi sign-ins (the `auth.json` each writes) are kept on one named volume
 msbx copies only loopback providers from your pi `models.json` into the VM, so a cloud API key
 in that file stays on the host. The copied file is written with mode 600.
 
-## Known issue: git hooks can run VM-written code on the host
+## Git: hooks and settings the VM cannot plant
 
-> **Warning.** This is a known, unfixed gap. It is tracked in the
-> [Git safety RFC](../rfcs/0001-git-safety.md).
+`.git` is inside the shared project folder, and git on your Mac runs programs named in it:
+scripts in `.git/hooks/` (or the `core.hooksPath` directory), and settings such as
+`core.fsmonitor`, `core.sshCommand`, filter and diff drivers, `credential.helper` and `!`
+aliases in `.git/config`. Cursor shipped this as CVE-2026-26268. msbx closes it in three layers
+([RFC 0001](../rfcs/0001-git-safety.md), [how-to](../how-to/guard-git.md)):
 
-Because `.git` is inside the writable project folder, code in the VM can add or change files
-that git on the host later executes, such as scripts in `.git/hooks/` or settings in
-`.git/config` that name a program to run (for example `core.hooksPath` or `core.fsmonitor`).
-The next time you run `git commit`, `git status` or a similar command in that project **on the
-host**, that code runs as your user, outside the sandbox.
+- In new sandboxes the agent runs as the unprivileged user `node` under microsandbox's
+  `restricted` profile (`no_new_privs`, no `CAP_SYS_ADMIN` even for root). `.git` is its own
+  read-write mount, and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree`, a
+  `.git` pointer file, and any `core.hooksPath` or `include.path` target inside the project
+  are read-only mounts. Measured in a VM: the agent and root both get `Read-only file system`
+  or `Device or resource busy`, `umount` fails, and `git commit` works.
+- msbx runs git on your Mac only through one helper with `core.hooksPath=/dev/null`,
+  `core.fsmonitor=false` and no config includes, and only to read a repository's config and
+  your identity.
+- msbx fingerprints those files before each session and warns, on the terminal and with a
+  `git!` badge in the dashboard, when they changed during a session or since the last one.
 
-Until this is fixed:
+What stays open:
 
-- Treat a project an agent has worked on as untrusted on the host.
-- Before running git on the host, check `.git/hooks/` and `.git/config` for changes, or run git
-  for that project only inside the sandbox.
+- Sandboxes created before this change run as root without guards. msbx says so when you
+  attach; recreate them with `msbx rm -f NAME`.
+- The agent can still rewrite history or corrupt the repository (`objects`, `refs`, `index`
+  are writable). That costs you work; no code runs on your Mac.
+- `.gitattributes` and `.lfsconfig` are writable; they only matter with a filter driver in your
+  global config (git-lfs reads only a safe subset of `.lfsconfig`). A nested repository the
+  agent creates under the project is only used if you `cd` into it. Submodules and linked
+  worktrees are not guarded yet.
+- Anything else on your Mac that reacts to project files (`package.json` scripts, `mise.toml`,
+  editor tasks) is out of scope.
 
 ## Reporting vulnerabilities
 

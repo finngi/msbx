@@ -6,7 +6,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use microsandbox::logs::LogOptions;
 use microsandbox::sandbox::{
-    MAX_SANDBOX_LIST_LIMIT, RootfsSource, SandboxHandle, SandboxStatus, VolumeMount,
+    MAX_SANDBOX_LIST_LIMIT, RootfsSource, SandboxHandle, SandboxStatus, SecurityProfile,
+    VolumeMount,
 };
 use microsandbox::{
     MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkAction, NetworkPolicy, Sandbox,
@@ -16,7 +17,7 @@ use microsandbox_types::{Action, Destination, DestinationGroup, Direction, Netwo
 
 use crate::agents::{self, Agent, Login};
 use crate::model::{SandboxInfo, Status, validate_name};
-use crate::{models, proxy};
+use crate::{guard, hostgit, models, proxy};
 
 /// Where progress and notes from setting up a sandbox go: stderr for the CLI, the status line
 /// for the TUI (which must not print over its own screen).
@@ -27,14 +28,23 @@ const LABEL_PROJECT: &str = "msbx.project";
 /// `proxy` marks sandboxes created to use the msbx proxy, so `policy.toml` applies to them.
 const LABEL_NETWORK: &str = "msbx.network";
 const NETWORK_PROXY: &str = "proxy";
+/// `guarded` marks sandboxes whose git data is mounted read-only under a non-root agent
+/// (RFC 0001); `none` means the project had no repository to guard. Absent on older sandboxes.
+const LABEL_GIT: &str = "msbx.git";
+const GIT_GUARDED: &str = "guarded";
+const GIT_NONE: &str = "none";
+
+/// The unprivileged user the agent runs as: uid 1000 in `node:24-bookworm-slim`. Not root, so
+/// it cannot unmount the read-only git mounts; under the `restricted` profile neither can root.
+const AGENT_USER: &str = "node";
 
 /// Host ports the sandbox may reach directly (Ollama, LM Studio); fixed at create because
 /// host-bound traffic never goes through the proxy.
 const HOST_MODEL_PORTS: [u16; 2] = [11434, 1234];
 const INSTALL_MARKER: &str = "/root/.msbx-installed";
 
-/// Guest mount point of the per-agent login volume (RFC 0004).
-const LOGIN_MOUNT: &str = "/root/.msbx-login";
+/// Guest mount point of the per-agent login volume (RFC 0004), under the agent user's home.
+const LOGIN_DIR: &str = ".msbx-login";
 
 /// Login volumes are `msbx-login-<agent>`.
 const LOGIN_VOLUME_PREFIX: &str = "msbx-login-";
@@ -155,15 +165,26 @@ async fn ensure_with_mode(
              (export it, or store it with `msbx secret set {var}`)"
         ));
     }
+    let guards = guard::mounts(project)?;
+    let git_label = if guards.is_empty() {
+        GIT_NONE
+    } else {
+        GIT_GUARDED
+    };
     let mut builder = Sandbox::builder(name)
         .image(agents::IMAGE)
         .cpus(host_cpus())
         .memory(MEMORY_MIB)
         .volume(project_path, |mount| mount.bind(project))
         .workdir(project_path)
+        // Not root, and no CAP_SYS_ADMIN even for root: the read-only git mounts below cannot
+        // be unmounted from inside (RFC 0001, experiments 1 and 3).
+        .user(AGENT_USER)
+        .security(SecurityProfile::Restricted)
         .label(LABEL_AGENT, agent.id)
         .label(LABEL_PROJECT, project_path)
         .label(LABEL_NETWORK, NETWORK_PROXY)
+        .label(LABEL_GIT, git_label)
         .network(|network| network.policy(static_policy))
         // Per-host decisions happen in the msbx proxy; the token is read from the host
         // environment at each start, like secrets, so it never lands in the database.
@@ -173,9 +194,25 @@ async fn ensure_with_mode(
                 .credentials(name, SecretSource::env(proxy::TOKEN_VAR))
         })
         .detached(true);
+    for guard in guards {
+        // Same path as on the host, like the project itself; the git dir read-write so it
+        // cannot be renamed or replaced, hooks, config and friends read-only.
+        let guest = guard
+            .path
+            .to_str()
+            .with_context(|| format!("path {} is not valid UTF-8", guard.path.display()))?;
+        builder = builder.volume(guest, |mount| {
+            let mount = mount.bind(&guard.path);
+            if guard.readonly {
+                mount.readonly()
+            } else {
+                mount
+            }
+        });
+    }
     if let Some(volume) = &login_volume {
         // Files on the volume can be read and replaced, never run (RFC 0004 "Security").
-        builder = builder.volume(LOGIN_MOUNT, |mount| {
+        builder = builder.volume(login_mount(&home_dir(Some(AGENT_USER))), |mount| {
             mount.named(volume.as_str()).noexec().nosuid().nodev()
         });
     }
@@ -233,10 +270,33 @@ pub(crate) async fn prepare_existing(name: &str, agent: &Agent, notify: Notify<'
     prepared
 }
 
+/// Readies a connected sandbox for the agent. Paths come from the sandbox's stored config, so a
+/// sandbox created before the git guard (agent root, home `/root`) keeps working.
 async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str, notify: Notify<'_>) -> Result<()> {
+    let spec = &sandbox.config().spec;
+    if !spec.labels.contains_key(LABEL_GIT) {
+        notify(format!(
+            "note: {name} was created before git guards; the agent runs as root and can change \
+             .git/hooks and .git/config; recreate it with `msb rm -f {name}`"
+        ));
+    }
+    let home = home_dir(spec.runtime.user.as_deref());
     install_once(sandbox, agent, name, notify).await?;
-    link_login(sandbox, agent, name, notify).await?;
-    write_models(sandbox, agent, name, notify).await
+    link_login(sandbox, agent, name, &home, notify).await?;
+    write_models(sandbox, agent, name, &home, notify).await?;
+    seed_identity(sandbox, name).await
+}
+
+/// Home of the guest user the agent runs as; `None` is the image default, root.
+fn home_dir(user: Option<&str>) -> String {
+    match user {
+        None | Some("root") => "/root".to_owned(),
+        Some(user) => format!("/home/{}", user.split(':').next().unwrap_or(user)),
+    }
+}
+
+fn login_mount(home: &str) -> String {
+    format!("{home}/{LOGIN_DIR}")
 }
 
 /// The named volume holding the agent's sign-in, shared by all its sandboxes; `None` for
@@ -310,13 +370,15 @@ async fn link_login(
     sandbox: &Sandbox,
     agent: &Agent,
     name: &str,
+    home: &str,
     notify: Notify<'_>,
 ) -> Result<()> {
     let Some(login) = &agent.login else {
         return Ok(());
     };
+    // Root, so a file left on the volume by an older (root) sandbox can be handed to the agent user.
     let output = sandbox
-        .shell(login_script(login))
+        .shell_with(login_script(login, home), |options| options.user("root"))
         .await
         .with_context(|| format!("linking the {} login in {name}", agent.id))?;
     match output.status().code {
@@ -337,8 +399,8 @@ async fn link_login(
     }
 }
 
-/// Makes `$1/$2` a link to `$3/$2` on the login volume. Paths arrive as arguments, never as
-/// shell syntax, and the script runs unchanged on the host in tests.
+/// Makes `$1/$2` a link to `$3/$2` on the login volume, owned by user `$4`. Paths arrive as
+/// arguments, never as shell syntax, and the script runs unchanged on the host in tests.
 const LINK_LOGIN: &str = r#"set -eu
 umask 077
 guest="$1/$2"
@@ -351,17 +413,51 @@ if [ -e "$shared" ] && [ ! -f "$shared" ]; then exit 1; fi
 if [ -f "$guest" ] && [ ! -L "$guest" ]; then mv -f "$guest" "$shared"; fi
 if [ -e "$guest" ] && [ ! -L "$guest" ]; then exit 1; fi
 ln -sfn "$shared" "$guest"
-if [ -f "$shared" ]; then chmod 600 "$shared"; fi
+if [ -f "$shared" ]; then chmod 600 "$shared"; chown "$4" "$shared"; fi
+chown -h "$4" "$1" "$guest"
 "#;
 
 /// Guest shell script that links the agent's credential file to the login volume.
-fn login_script(login: &Login) -> String {
-    // Login paths come from the static agent table, never from user input.
+fn login_script(login: &Login, home: &str) -> String {
+    // Login paths come from the static agent table, never from user input; `home` is derived
+    // from the stored sandbox user, which msbx set.
+    let mount = login_mount(home);
+    let owner = if home == "/root" { "root" } else { AGENT_USER };
     format!(
-        "grep -q ' {LOGIN_MOUNT} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
-         set -- '{}' '{}' '{LOGIN_MOUNT}'\n{LINK_LOGIN}",
+        "grep -q ' {mount} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
+         set -- '{home}/{}' '{}' '{mount}' '{owner}'\n{LINK_LOGIN}",
         login.dir, login.file
     )
+}
+
+/// Guest shell script that gives the VM the host's git identity when it has none, so the agent
+/// can commit: repository config is read-only in the VM (RFC 0001). Values arrive in the
+/// environment, never in the script text.
+const SEED_IDENTITY: &str = r#"command -v git >/dev/null 2>&1 || exit 0
+git config --global user.name >/dev/null 2>&1 || git config --global user.name "$MSBX_GIT_NAME"
+git config --global user.email >/dev/null 2>&1 || git config --global user.email "$MSBX_GIT_EMAIL"
+"#;
+
+async fn seed_identity(sandbox: &Sandbox, name: &str) -> Result<()> {
+    let Some((user_name, email)) = hostgit::identity() else {
+        return Ok(());
+    };
+    let output = sandbox
+        .shell_with(SEED_IDENTITY, |options| {
+            options
+                .env("MSBX_GIT_NAME", user_name)
+                .env("MSBX_GIT_EMAIL", email)
+        })
+        .await
+        .with_context(|| format!("setting the git identity in {name}"))?;
+    if !output.status().success {
+        bail!(
+            "setting the git identity in {name} failed with exit code {}:\n{}",
+            output.status().code,
+            String::from_utf8_lossy(output.stderr_bytes()).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Writes pi's `models.json` for the host's local model servers, or says why there is none.
@@ -369,11 +465,13 @@ async fn write_models(
     sandbox: &Sandbox,
     agent: &Agent,
     name: &str,
+    home: &str,
     notify: Notify<'_>,
 ) -> Result<()> {
-    let Some(guest_path) = agent.models_file else {
+    let Some(models_file) = agent.models_file else {
         return Ok(());
     };
+    let guest_path = &format!("{home}/{models_file}");
     // File reads and socket probes block, so keep them off the runtime threads.
     let json = tokio::task::spawn_blocking(models::guest_models_json)
         .await
@@ -468,7 +566,9 @@ async fn install_once(
     notify: Notify<'_>,
 ) -> Result<()> {
     let probe = sandbox
-        .shell(format!("test -f {INSTALL_MARKER}"))
+        .shell_with(format!("test -f {INSTALL_MARKER}"), |options| {
+            options.user("root")
+        })
         .await
         .with_context(|| format!("checking install marker in {name}"))?;
     if probe.status().success {
@@ -480,8 +580,9 @@ async fn install_once(
         agent.id
     ));
     let script = format!("set -e\n{}\ntouch {INSTALL_MARKER}", agent.install);
+    // The agent runs unprivileged; installing needs root.
     let output = sandbox
-        .shell(script)
+        .shell_with(script, |options| options.user("root"))
         .await
         .with_context(|| format!("running install script in {name}"))?;
     if !output.status().success {
@@ -561,6 +662,7 @@ fn info(handle: &SandboxHandle, metrics: Option<&SandboxMetrics>) -> SandboxInfo
         proxied: spec.is_some_and(|spec| {
             spec.labels.get(LABEL_NETWORK).map(String::as_str) == Some(NETWORK_PROXY)
         }),
+        git_guarded: spec.is_some_and(|spec| spec.labels.contains_key(LABEL_GIT)),
         rx_bytes: metrics.map(|metrics| metrics.net_rx_bytes),
         tx_bytes: metrics.map(|metrics| metrics.net_tx_bytes),
         secrets: spec
@@ -948,10 +1050,10 @@ mod tests {
         command: "true",
         secrets: &[],
         login: Some(Login {
-            dir: "/root/.logintest",
+            dir: ".logintest",
             file: "auth.json",
         }),
-        models_file: Some("/root/.logintest/models.json"),
+        models_file: Some(".logintest/models.json"),
     };
 
     #[test]
@@ -969,11 +1071,14 @@ mod tests {
 
     #[cfg(unix)]
     fn run_link_script(root: &Path) -> Result<()> {
+        // `chown` to the user running the test: the only owner it may set without privileges.
+        let owner = std::process::Command::new("id").arg("-un").output()?;
         let output = std::process::Command::new("sh")
             .args(["-c", LINK_LOGIN, "msbx-login"])
             .arg(root.join("guest"))
             .arg("auth.json")
             .arg(root.join("volume"))
+            .arg(String::from_utf8(owner.stdout)?.trim())
             .output()?;
         anyhow::ensure!(
             output.status.success(),
@@ -1032,27 +1137,47 @@ mod tests {
 
     #[test]
     fn login_script_checks_the_mount_and_passes_paths_as_arguments() {
-        let script = login_script(&Login {
-            dir: "/root/.codex",
+        let login = Login {
+            dir: ".codex",
             file: "auth.json",
-        });
+        };
+        let script = login_script(&login, "/home/node");
         assert!(
-            script.starts_with("grep -q ' /root/.msbx-login ' /proc/mounts || exit 3\n"),
+            script.starts_with("grep -q ' /home/node/.msbx-login ' /proc/mounts || exit 3\n"),
             "{script}"
         );
         assert!(
-            script.contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login'\n"),
+            script.contains(
+                "set -- '/home/node/.codex' 'auth.json' '/home/node/.msbx-login' 'node'\n"
+            ),
             "{script}"
         );
         assert!(script.ends_with(LINK_LOGIN), "{script}");
+
+        // A sandbox created before the git guard keeps its root paths.
+        let older = login_script(&login, "/root");
+        assert!(
+            older.contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login' 'root'\n"),
+            "{older}"
+        );
+    }
+
+    #[test]
+    fn home_follows_the_stored_sandbox_user() {
+        assert_eq!(home_dir(None), "/root");
+        assert_eq!(home_dir(Some("root")), "/root");
+        assert_eq!(home_dir(Some("node")), "/home/node");
+        assert_eq!(home_dir(Some("node:node")), "/home/node");
+        assert_eq!(login_mount("/home/node"), "/home/node/.msbx-login");
     }
 
     #[test]
     fn models_script_writes_stdin_with_mode_600() {
         assert_eq!(
-            models_script("/root/.pi/agent/models.json"),
-            "set -e\numask 077\nmkdir -p '/root/.pi/agent'\ncat > '/root/.pi/agent/models.json'\n\
-             chmod 600 '/root/.pi/agent/models.json'\n"
+            models_script("/home/node/.pi/agent/models.json"),
+            "set -e\numask 077\nmkdir -p '/home/node/.pi/agent'\n\
+             cat > '/home/node/.pi/agent/models.json'\n\
+             chmod 600 '/home/node/.pi/agent/models.json'\n"
         );
     }
 
@@ -1077,12 +1202,12 @@ mod tests {
             let first = sandbox
                 .shell(
                     "set -e\n\
-                     test \"$(readlink /root/.logintest/auth.json)\" = /root/.msbx-login/auth.json\n\
-                     echo '{\"first\":1}' > /root/.logintest/auth.json\n\
-                     test -f /root/.msbx-login/auth.json\n\
-                     rm /root/.logintest/auth.json\n\
-                     echo '{\"second\":2}' > /root/.logintest/auth.json\n\
-                     cat /root/.logintest/models.json 2>/dev/null || true",
+                     test \"$(readlink /home/node/.logintest/auth.json)\" = /home/node/.msbx-login/auth.json\n\
+                     echo '{\"first\":1}' > /home/node/.logintest/auth.json\n\
+                     test -f /home/node/.msbx-login/auth.json\n\
+                     rm /home/node/.logintest/auth.json\n\
+                     echo '{\"second\":2}' > /home/node/.logintest/auth.json\n\
+                     cat /home/node/.logintest/models.json 2>/dev/null || true",
                 )
                 .await;
             sandbox.detach().await;
@@ -1099,8 +1224,8 @@ mod tests {
             let sandbox = Sandbox::get(&name).await?.connect().await?;
             let second = sandbox
                 .shell(
-                    "test -L /root/.logintest/auth.json && \
-                     stat -c %a /root/.msbx-login/auth.json && cat /root/.msbx-login/auth.json",
+                    "test -L /home/node/.logintest/auth.json && \
+                     stat -c %a /home/node/.msbx-login/auth.json && cat /home/node/.msbx-login/auth.json",
                 )
                 .await;
             sandbox.detach().await;
@@ -1200,6 +1325,145 @@ mod tests {
             .await;
         sandbox.detach().await;
         Ok(output?.status().success)
+    }
+
+    /// Installs git so the agent user can commit; the host-side guard needs nothing else.
+    static GUARD_AGENT: Agent = Agent {
+        id: "guardtest",
+        install: "apt-get update && apt-get install -y --no-install-recommends git",
+        command: "true",
+        secrets: &[],
+        login: None,
+        models_file: None,
+    };
+
+    /// Runs `script` in the sandbox as `user` and returns its stdout, failing on a non-zero exit.
+    async fn guest(name: &str, user: &str, script: &str) -> Result<String> {
+        let sandbox = Sandbox::get(name).await?.connect().await?;
+        let output = sandbox
+            .shell_with(script, |options| options.user(user))
+            .await;
+        sandbox.detach().await;
+        let output = output?;
+        anyhow::ensure!(
+            output.status().success,
+            "as {user}: {script}\n{}",
+            output.stderr()?
+        );
+        Ok(output.stdout()?)
+    }
+
+    /// Boots a real VM and proves RFC 0001's prevention layer: the agent user and root can
+    /// neither write hooks or config nor unmount the guards, the agent can still commit, and
+    /// a hook that appears on the host side is reported. Same variables as the proxy test.
+    #[tokio::test]
+    #[ignore = "boots a real microVM; needs XDG_CONFIG_HOME, XDG_STATE_HOME and MSBX_PROXY_TOKEN"]
+    async fn git_guard_holds_against_the_agent_and_root() -> Result<()> {
+        use crate::guard;
+
+        let dirs = test_dirs()?;
+        let open = crate::policy::Policy::new(crate::policy::Preset::Open);
+        let server = test_proxy(&dirs, &open).await?;
+        use_runtime(&crate::attach::msb_path()?);
+        let project = std::env::temp_dir()
+            .join(format!("msbx-guard-{}", std::process::id()))
+            .join("proj");
+        std::fs::create_dir_all(&project)?;
+        let project = project.canonicalize()?;
+        for args in [
+            vec!["init", "-q"],
+            vec!["commit", "-q", "--allow-empty", "-m", "init"],
+        ] {
+            let output = hostgit::command()
+                .current_dir(&project)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.test"])
+                .args(&args)
+                .output()?;
+            anyhow::ensure!(output.status.success(), "git {args:?} failed");
+        }
+
+        let created = ensure(&GUARD_AGENT, &project, &print_note).await;
+        let outcome = Box::pin(async {
+            let name = created?;
+            let config = Sandbox::get(&name).await?.config()?;
+            assert_eq!(
+                config.spec.labels.get(LABEL_GIT).map(String::as_str),
+                Some(GIT_GUARDED)
+            );
+            assert_eq!(config.spec.runtime.user.as_deref(), Some(AGENT_USER));
+            assert_eq!(config.spec.security_profile, SecurityProfile::Restricted);
+            let guarded: Vec<String> = config.spec.mounts.iter().map(mount).collect();
+            assert_eq!(guarded.len(), 6, "{guarded:?}");
+
+            let (session, warning) = guard::Session::start(&dirs, &name, &project)?;
+            assert_eq!(warning, None);
+            let p = project.display();
+            // Every attack line must fail; `!` turns that into success for `set -e`.
+            let blocked = format!(
+                "set -e\ncd '{p}'\n\
+                 test \"$(id -un)\" = node\n\
+                 ! echo evil > .git/hooks/pre-commit\n\
+                 ! touch .git/info/x\n\
+                 ! git config core.fsmonitor /tmp/evil\n\
+                 ! git config core.hooksPath /tmp\n\
+                 ! mv .git .git2\n\
+                 ! mv .git/hooks .git/h2\n\
+                 ! umount .git/hooks 2>/dev/null\n\
+                 ! umount -l .git/config 2>/dev/null\n\
+                 echo blocked-ok"
+            );
+            assert_eq!(
+                guest(&name, AGENT_USER, &blocked).await?.trim(),
+                "blocked-ok"
+            );
+            let as_root = format!(
+                "set -e\ncd '{p}'\n\
+                 ! umount .git/hooks 2>/dev/null\n\
+                 ! mount -o remount,rw .git/hooks 2>/dev/null\n\
+                 ! echo evil > .git/hooks/pre-commit\n\
+                 ! echo '[core]' >> .git/config\n\
+                 echo root-blocked-ok"
+            );
+            assert_eq!(
+                guest(&name, "root", &as_root).await?.trim(),
+                "root-blocked-ok"
+            );
+            let commit = format!(
+                "set -e\ncd '{p}'\n\
+                 git config --global user.name vm\n\
+                 git config --global user.email vm@test\n\
+                 echo change > a.txt\n\
+                 git add a.txt\n\
+                 git commit -q -m from-vm\n\
+                 git branch feature\n\
+                 git log --oneline | wc -l"
+            );
+            assert_eq!(guest(&name, AGENT_USER, &commit).await?.trim(), "2");
+            let on_host = hostgit::command()
+                .current_dir(&project)
+                .args(["log", "--format=%s", "-1"])
+                .output()?;
+            assert_eq!(String::from_utf8_lossy(&on_host.stdout).trim(), "from-vm");
+            assert_eq!(
+                session.finish()?,
+                None,
+                "a commit is not a change to guard against"
+            );
+
+            // Something that got past the guard shows up in the session report.
+            std::fs::write(project.join(".git/hooks/pre-commit"), "#!/bin/sh\nevil\n")?;
+            let warning = session.finish()?.context("a planted hook is reported")?;
+            assert!(warning.contains(".git/hooks/pre-commit (new)"), "{warning}");
+            anyhow::Ok(name)
+        })
+        .await;
+        if let Ok(name) = &outcome {
+            remove(name).await?;
+        }
+        std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
+        proxy::stop(&dirs).await?;
+        tokio::time::timeout(Duration::from_secs(5), server).await???;
+        outcome.map(|_| ())
     }
 
     /// Boots a real VM through an in-process proxy on the fixed port and checks the live policy.
