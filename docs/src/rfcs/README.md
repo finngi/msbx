@@ -37,14 +37,24 @@ Each RFC starts with a short metadata list:
 | 0009 | [Ports](0009-ports.md) | Open a dev server running in the sandbox from your browser, without restarting it | none |
 
 ```mermaid
-graph LR
-  G[0001 Git safety] --> W[0007 Worktrees]
-  C[0002 Config file] --> GH[0003 GitHub access]
-  C --> L[0004 Shared logins]
-  C --> S[0006 Setup script]
-  C --> N[0008 Network view]
-  D[0005 Detachable sessions]
-  P[0009 Ports]
+flowchart LR
+  subgraph now["1 · Can start now"]
+    direction TB
+    S[0001 Git safety]
+    C[0002 Config file]
+    D[0005 Detachable sessions]
+    P[0009 Ports]
+  end
+  subgraph next["2 · Needs an earlier RFC"]
+    direction TB
+    GH[0003 GitHub access]
+    L[0004 Shared logins]
+    SU[0006 Setup script]
+    N[0008 Network view]
+    W[0007 Worktrees]
+  end
+  C --> GH & L & SU & N
+  S --> W
 ```
 
 ## Decisions so far
