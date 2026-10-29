@@ -7,7 +7,7 @@ and [security policy](https://github.com/superradcompany/microsandbox/blob/main/
 ## Isolated
 
 - Each sandbox is a separate microVM with its own kernel.
-- Only the project folder is mounted from the host filesystem.
+- Only the project folder is mounted from the host. The VM sees nothing else on your filesystem.
 - API keys stay on the host. The VM sees a placeholder, which microsandbox replaces with
   the real key only on requests to the allowed host.
 
