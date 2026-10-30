@@ -29,6 +29,9 @@ Before 1.0.0, minor versions may contain breaking changes.
 - `msbx policy init|ls|allow|deny|rm|check|log|preset` and `msbx proxy serve|status|stop`. The first `msbx agent` asks for a preset.
 - Dashboard: a Network tab per sandbox with the proxy's log (`a` allow here, `A` allow everywhere, `b` block, `p` preset), `policy <preset> (proxied)` and a traffic row on the Overview.
 - `msbx start NAME` and other pass-through commands put the proxy token in `msb`'s environment and start the proxy when needed.
+- Git guard (RFC 0001): new sandboxes run the agent as the unprivileged `node` user under microsandbox's `restricted` profile, mount `.git` read-write at the same path and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree`, a `.git` pointer file and in-project `core.hooksPath` or `include.path` targets read-only, and the same for every submodule git dir under `.git/modules`, so the agent cannot plant hooks or settings git on the host would run; label `msbx.git`. A linked worktree or submodule checkout cannot be guarded and gets a `note:`. msbx itself runs git on the host only as `/usr/bin/git` from `/` with a cleared environment, to parse one config file or read your identity.
+- msbx warns at the end of each agent session, and at the next launch, when the project's git hooks, risky settings or pointer files changed, with commands that read the files as data (never a git command on the project: `git status` runs planted clean filters and `core.hooksPath=/dev/null` does not stop config-defined hooks); the dashboard shows a red `git!` badge and a `git` row on the Overview. Baselines live under `~/.local/state/msbx/git-guard/`.
+- The VM's global git identity is seeded from your Mac's `user.name` and `user.email`, since repository config is read-only there.
 
 ### Changed
 
@@ -38,6 +41,7 @@ Before 1.0.0, minor versions may contain breaking changes.
 - The Network tab tells sandboxes msbx did not create apart from ones created before network policy.
 - Sandbox network defaults: deny by default, DNS and the Ollama and LM Studio ports to the host, public TCP through the proxy. Sandboxes created earlier keep `public + host` and ignore the policy.
 - `msbx run` is renamed `msbx agent`; `msbx run` now passes through to `msb run`.
+- The agent is no longer root: `apt-get` and `sudo` fail in the VM (use `msbx exec -t -u root NAME -- …`), and `git config`, `git remote add` and `git branch --set-upstream-to` cannot write the repository config. Login files and pi's `models.json` live under `/home/node`. Sandboxes created earlier keep root, no guards and their `/root` paths; msbx prints a note on attach and the dashboard's `git` row says `not guarded`.
 
 ### Fixed
 

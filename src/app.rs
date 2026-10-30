@@ -1,5 +1,6 @@
 //! Pure dashboard state. IO is returned as an action for the terminal loop.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -228,6 +229,9 @@ pub(crate) struct App {
     help_scroll_limit: usize,
     expanded: Option<NetworkKey>,
     search_before: String,
+    /// Per sandbox, the git files of its project that changed since its last agent session
+    /// started (RFC 0001), already formatted; absent or empty when nothing changed.
+    pub(crate) git_changes: BTreeMap<String, Vec<String>>,
 }
 
 impl App {
@@ -268,11 +272,19 @@ impl App {
             help_scroll_limit: 0,
             expanded: None,
             search_before: String::new(),
+            git_changes: BTreeMap::new(),
         }
     }
 
     pub(crate) fn selected_sandbox(&self) -> Option<&SandboxInfo> {
         self.sandboxes.get(self.selected)
+    }
+
+    /// The git changes recorded for the selected sandbox's project.
+    pub(crate) fn selected_git_changes(&self) -> &[String] {
+        self.selected_sandbox()
+            .and_then(|sandbox| self.git_changes.get(&sandbox.name))
+            .map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn network_rows(&self) -> Vec<&NetEntry> {
@@ -1149,6 +1161,7 @@ mod tests {
             uptime: None,
             network: None,
             proxied: true,
+            git_guarded: true,
             rx_bytes: None,
             tx_bytes: None,
             secrets: Vec::new(),
@@ -1237,6 +1250,22 @@ mod tests {
         let mut app = app();
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT);
         assert_eq!(app.update(key), None);
+    }
+
+    #[test]
+    fn git_changes_follow_the_selected_sandbox() {
+        let mut app = app();
+        assert_eq!(app.selected_git_changes(), [] as [String; 0]);
+        app.git_changes
+            .insert(name("b"), vec![name(".git/hooks/pre-commit (new)")]);
+        assert_eq!(app.selected_git_changes(), [] as [String; 0]);
+        app.select_named("b");
+        assert_eq!(
+            app.selected_git_changes(),
+            [name(".git/hooks/pre-commit (new)")]
+        );
+        app.selected = app.sandboxes.len();
+        assert_eq!(app.selected_git_changes(), [] as [String; 0]);
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub(crate) struct Fixture {
     pub(crate) credentials: Vec<String>,
     #[serde(default)]
     pub(crate) logs: BTreeMap<String, Vec<String>>,
+    /// Per sandbox, changed git files to show (RFC 0001); plain text, nothing is checked.
+    #[serde(default)]
+    pub(crate) git_changes: BTreeMap<String, Vec<String>>,
 }
 
 pub(crate) fn load(path: &Path) -> Result<Fixture> {
@@ -63,6 +66,8 @@ struct SandboxFixture {
     network: Option<String>,
     #[serde(default)]
     proxied: bool,
+    #[serde(default)]
+    git_guarded: bool,
     rx_bytes: Option<u64>,
     tx_bytes: Option<u64>,
     #[serde(default)]
@@ -103,6 +108,7 @@ impl SandboxFixture {
             uptime: self.uptime_secs.map(Duration::from_secs),
             network: self.network,
             proxied: self.proxied,
+            git_guarded: self.git_guarded,
             rx_bytes: self.rx_bytes,
             tx_bytes: self.tx_bytes,
             secrets: self.secrets,
@@ -122,9 +128,14 @@ mod tests {
             "workspace":"/tmp",
             "sandboxes":[{"name":"codex-api","status":"running","agent":"codex","proxied":true}],
             "policy":{"preset":"balanced"},
-            "logs":{"codex-api":["ready"]}
+            "logs":{"codex-api":["ready"]},
+            "git_changes":{"codex-api":[".git/hooks/pre-commit (new)"]}
         }"#,
         )?;
+        assert_eq!(
+            fixture.git_changes.get("codex-api"),
+            Some(&vec![".git/hooks/pre-commit (new)".to_owned()])
+        );
         assert_eq!(
             fixture.sandboxes.first().context("fixture sandbox")?.status,
             Status::Running

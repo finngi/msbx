@@ -37,6 +37,12 @@ These actions apply while Cards has focus.
 Attaching gives the agent the terminal. The dashboard returns when you exit and shows the exit
 code. Stopping waits up to 30 seconds for a graceful shutdown and never kills the VM.
 
+A card shows `git!` in red when the project's git hooks, config or pointer files changed since
+the sandbox's last session started; the Overview's `git` row lists the changes, or reads
+`guarded` / `not guarded (created before git guards; …)`. The check runs every 2 seconds for
+every sandbox msbx created, against the baseline stored by its last session
+([Keep git safe](../how-to/guard-git.md)).
+
 ## Network
 
 Rows show time, host, port, hits and status. Each row combines the history for one sandbox,

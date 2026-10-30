@@ -1,6 +1,7 @@
 //! Terminal setup, the event loop, and suspending the TUI to hand the terminal to `msb exec`.
 //! All of the TUI's IO lives here so `app.rs` and `ui.rs` stay pure.
 
+use std::collections::BTreeMap;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,7 +25,7 @@ use crate::model::SandboxInfo;
 use crate::paths::Dirs;
 use crate::policy::{self, Policy, Preset, Target};
 use crate::tui_data::{self, NetworkData, read_network};
-use crate::{attach, proxy, sandbox, ui};
+use crate::{attach, guard, proxy, sandbox, ui};
 
 /// Redraws happen at most this often, and only when something changed.
 const FRAME: Duration = Duration::from_millis(33);
@@ -63,8 +64,17 @@ enum Job {
 
 #[derive(Debug, PartialEq)]
 enum Foreground {
-    Attach { name: String, agent: &'static Agent },
-    Exec { name: String, command: &'static str },
+    Attach {
+        name: String,
+        agent: &'static Agent,
+        /// The project, when the sandbox has one, so its git files are checked around the session.
+        project: Option<PathBuf>,
+    },
+    Exec {
+        name: String,
+        command: &'static str,
+        project: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,6 +113,8 @@ enum Message {
     Status(String),
     /// A sandbox the user just created; select its card once it is listed.
     Created(String),
+    /// Per sandbox, the git files of its project that changed since its last session started.
+    Git(BTreeMap<String, Vec<String>>),
 }
 
 /// Input plus periodic refresh. Dropping it stops both, so while the TUI is suspended nothing
@@ -167,19 +179,26 @@ impl Session {
                 ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
                     ticks.tick().await;
-                    if sender
-                        .send(Message::Sandboxes(sandbox::list().await))
-                        .await
-                        .is_err()
-                    {
+                    let sandboxes = sandbox::list().await;
+                    let projects = projects_of(sandboxes.as_deref().unwrap_or_default());
+                    if sender.send(Message::Sandboxes(sandboxes)).await.is_err() {
                         return;
                     }
                     let read_dirs = dirs.clone();
-                    let result = tokio::task::spawn_blocking(move || read_network(&read_dirs))
-                        .await
-                        .context("reading network data")
-                        .and_then(std::convert::identity);
-                    if sender.send(Message::Network(result)).await.is_err() {
+                    let (result, git) = match tokio::task::spawn_blocking(move || {
+                        (read_network(&read_dirs), read_git(&read_dirs, &projects))
+                    })
+                    .await
+                    {
+                        Ok(pair) => pair,
+                        Err(error) => (
+                            Err(anyhow::Error::from(error).context("reading network data")),
+                            BTreeMap::new(),
+                        ),
+                    };
+                    if sender.send(Message::Network(result)).await.is_err()
+                        || sender.send(Message::Git(git)).await.is_err()
+                    {
                         return;
                     }
                 }
@@ -226,6 +245,30 @@ fn install_paste_cleanup() {
     }));
 }
 
+/// Sandbox name and project of every sandbox msbx created for a folder.
+fn projects_of(sandboxes: &[SandboxInfo]) -> Vec<(String, PathBuf)> {
+    sandboxes
+        .iter()
+        .filter(|sandbox| sandbox.agent.is_some())
+        .filter_map(|sandbox| Some((sandbox.name.clone(), sandbox.project.clone()?)))
+        .collect()
+}
+
+/// Git files changed since each sandbox's last session started (RFC 0001). A project that
+/// cannot be read shows one line saying so rather than nothing.
+fn read_git(dirs: &Dirs, projects: &[(String, PathBuf)]) -> BTreeMap<String, Vec<String>> {
+    projects
+        .iter()
+        .map(|(name, project)| {
+            let lines = match guard::check(dirs, name, project) {
+                Ok(changes) => changes.iter().map(ToString::to_string).collect(),
+                Err(error) => vec![format!("check failed: {error:#}")],
+            };
+            (name.clone(), lines)
+        })
+        .collect()
+}
+
 /// The name `msbx agent` gives `agent`'s sandbox for `project`; empty for an unknown agent.
 pub(crate) fn preview_name(agent: &str, project: &Path) -> String {
     agents::find(agent).map_or_else(String::new, |agent| sandbox::sandbox_name(agent, project))
@@ -265,6 +308,7 @@ pub(crate) async fn run_fixture(path: &Path, dirs: Dirs) -> Result<()> {
             .map_or_else(Vec::new, tui_data::rule_rows),
     );
     app.credentials = fixture.credentials;
+    app.git_changes = fixture.git_changes;
     let mode = RunMode::Fixture {
         workspace: fixture.workspace,
         logs: fixture.logs,
@@ -375,13 +419,22 @@ fn step(action: Action, sandboxes: &[SandboxInfo], mode: &RunMode) -> Result<Ste
         Action::Stop { name } => Step::Job(Job::Stop(name)),
         Action::Remove { name } => Step::Job(Job::Remove(name)),
         Action::LoadLogs { name } => Step::Job(Job::Logs(name)),
-        Action::Shell { name } => Step::Suspend(Foreground::Exec {
-            name,
-            command: SHELL,
-        }),
+        Action::Shell { name } => {
+            let project = project_of(sandboxes, &name);
+            Step::Suspend(Foreground::Exec {
+                name,
+                command: SHELL,
+                project,
+            })
+        }
         Action::Attach { name } => {
             let agent = agent_of(sandboxes, &name)?;
-            Step::Suspend(Foreground::Attach { name, agent })
+            let project = project_of(sandboxes, &name);
+            Step::Suspend(Foreground::Attach {
+                name,
+                agent,
+                project,
+            })
         }
         Action::LoadFolders { path } => Step::Job(Job::Folders(path)),
         Action::Create {
@@ -490,6 +543,14 @@ fn agent_of(sandboxes: &[SandboxInfo], name: &str) -> Result<&'static Agent> {
         .and_then(|sandbox| sandbox.agent.as_deref())
         .with_context(|| format!("sandbox {name} has no msbx agent"))?;
     agents::find(label).with_context(|| format!("sandbox {name} has unknown agent {label}"))
+}
+
+/// The project recorded in sandbox `name`'s `msbx.project` label.
+fn project_of(sandboxes: &[SandboxInfo], name: &str) -> Option<PathBuf> {
+    sandboxes
+        .iter()
+        .find(|sandbox| sandbox.name == name)
+        .and_then(|sandbox| sandbox.project.clone())
 }
 
 /// Stopping can take seconds, so say that something is happening.
@@ -607,6 +668,7 @@ fn apply(app: &mut App, message: Message) {
         }
         Message::Status(status) => app.status_line = Some(status),
         Message::Created(name) => app.select_named(&name),
+        Message::Git(changes) => app.git_changes = changes,
     }
 }
 
@@ -634,19 +696,45 @@ async fn suspend(
 }
 
 async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
-    let (name, code) = match foreground {
-        Foreground::Attach { name, agent } => {
+    let (name, command, project) = match foreground {
+        Foreground::Attach {
+            name,
+            agent,
+            project,
+        } => {
             proxy::ensure_running(dirs).await?;
             sandbox::prepare_existing(&name, agent, &|note| eprintln!("{note}")).await?;
-            let code = attach::exec(&name, agent.command, &[]).await?;
-            (name, code)
+            (name, agent.command, project)
         }
-        Foreground::Exec { name, command } => {
-            let code = attach::exec(&name, command, &[]).await?;
-            (name, code)
-        }
+        Foreground::Exec {
+            name,
+            command,
+            project,
+        } => (name, command, project),
     };
-    Ok(format!("exited {name} (code {code})"))
+    // The terminal is the agent's now, so warnings go to stderr like `msbx agent`'s; the status
+    // line and the card's badge repeat them once the dashboard is back (RFC 0001).
+    let session = match &project {
+        Some(project) => {
+            let (session, warning) = guard::Session::start(dirs, &name, project)?;
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
+            Some(session)
+        }
+        None => None,
+    };
+    let code = attach::exec(&name, command, &[]).await?;
+    let mut status = format!("exited {name} (code {code})");
+    if let Some(warning) = session
+        .map(|session| session.finish())
+        .transpose()?
+        .flatten()
+    {
+        eprintln!("{warning}");
+        status.push_str("; git files changed, see Overview");
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -894,6 +982,7 @@ mod tests {
             uptime: None,
             network: None,
             proxied: true,
+            git_guarded: true,
             rx_bytes: None,
             tx_bytes: None,
             secrets: Vec::new(),
@@ -903,7 +992,10 @@ mod tests {
 
     fn sandboxes() -> Vec<SandboxInfo> {
         vec![
-            sandbox("codex-api", Some("codex")),
+            SandboxInfo {
+                project: Some(PathBuf::from("/work/api")),
+                ..sandbox("codex-api", Some("codex"))
+            },
             sandbox("pi-notes", Some("pi")),
             sandbox("foreign", None),
             sandbox("future", Some("claude")),
@@ -1092,7 +1184,14 @@ mod tests {
 
     #[test]
     fn attach_prepares_the_labelled_agent_before_running_it() -> Result<()> {
-        for (sandbox, agent) in [("codex-api", AgentId::Codex), ("pi-notes", AgentId::Pi)] {
+        for (sandbox, agent, project) in [
+            (
+                "codex-api",
+                AgentId::Codex,
+                Some(PathBuf::from("/work/api")),
+            ),
+            ("pi-notes", AgentId::Pi, None),
+        ] {
             assert_eq!(
                 step_for(Action::Attach {
                     name: name(sandbox)
@@ -1100,10 +1199,39 @@ mod tests {
                 Step::Suspend(Foreground::Attach {
                     name: name(sandbox),
                     agent: agent.agent(),
+                    project,
                 })
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn projects_are_read_only_for_sandboxes_msbx_created() {
+        let listed = projects_of(&sandboxes());
+        assert_eq!(listed, [(name("codex-api"), PathBuf::from("/work/api"))]);
+    }
+
+    #[test]
+    fn read_git_reports_each_project_and_check_failures() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("msbx-tui-git-{}", std::process::id()));
+        let dirs = Dirs {
+            config: root.join("config"),
+            state: root.join("state"),
+        };
+        let project = root.join("proj");
+        std::fs::create_dir_all(&project)?;
+        let outcome = (|| -> Result<()> {
+            let no_baseline = read_git(&dirs, &[(name("box"), project.clone())]);
+            assert_eq!(no_baseline["box"], [] as [String; 0]);
+            std::fs::create_dir_all(dirs.git_guard_dir())?;
+            std::fs::write(dirs.git_guard_dir().join("box.json"), "not json")?;
+            let broken = read_git(&dirs, &[(name("box"), project.clone())]);
+            assert!(broken["box"][0].starts_with("check failed: "), "{broken:?}");
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        outcome
     }
 
     #[test]
@@ -1131,6 +1259,7 @@ mod tests {
             Step::Suspend(Foreground::Exec {
                 name: name("codex-api"),
                 command: "bash",
+                project: Some(PathBuf::from("/work/api")),
             })
         );
         Ok(())

@@ -1,6 +1,8 @@
 mod agents;
 mod app;
 mod attach;
+mod guard;
+mod hostgit;
 mod input;
 mod keymap;
 mod model;
@@ -216,6 +218,12 @@ async fn run(cli: Cli) -> Result<u8> {
             proxy::ensure_running(&dirs).await?;
             let agent = agent.agent();
             let name = sandbox::ensure(agent, &project, &|note| eprintln!("{note}")).await?;
+            // Detached or not, launching is when the project's git files get compared with
+            // the baseline and the baseline moves on (RFC 0001).
+            let (session, warning) = guard::Session::start(&dirs, &name, &project)?;
+            if let Some(warning) = warning {
+                eprintln!("{warning}");
+            }
             if detach {
                 eprintln!(
                     "{name} is running; attach with `msbx agent {} {}`",
@@ -224,7 +232,11 @@ async fn run(cli: Cli) -> Result<u8> {
                 );
                 return Ok(0);
             }
-            attach::exec(&name, agent.command, &args).await
+            let code = attach::exec(&name, agent.command, &args).await?;
+            if let Some(warning) = session.finish()? {
+                eprintln!("{warning}");
+            }
+            Ok(code)
         }
         Some(Command::Secret(SecretAction::Set { var })) => secrets::set(&var),
         Some(Command::Secret(SecretAction::Rm { var })) => secrets::rm(&var),

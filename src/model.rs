@@ -31,6 +31,9 @@ pub(crate) struct SandboxInfo {
     pub(crate) network: Option<String>,
     /// Created with the msbx proxy (label `msbx.network=proxy`), so `policy.toml` applies.
     pub(crate) proxied: bool,
+    /// Created with the git guard (label `msbx.git`): the agent is not root and cannot change
+    /// hooks or config (RFC 0001). `false` for sandboxes created before it.
+    pub(crate) git_guarded: bool,
     pub(crate) rx_bytes: Option<u64>,
     pub(crate) tx_bytes: Option<u64>,
     /// Secret env var names only; values never leave the host.

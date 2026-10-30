@@ -13,8 +13,9 @@ pub(crate) struct Secret {
     pub(crate) host: &'static str,
 }
 
-/// Where an agent keeps its sign-in inside the VM. msbx links that file into the shared login
-/// volume so one sign-in serves every sandbox of the agent (RFC 0004).
+/// Where an agent keeps its sign-in inside the VM, relative to the agent user's home. msbx links
+/// that file into the shared login volume so one sign-in serves every sandbox of the agent
+/// (RFC 0004).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Login {
     pub(crate) dir: &'static str,
@@ -26,12 +27,14 @@ pub(crate) struct Agent {
     /// Stable identifier used in sandbox names, labels and the CLI.
     pub(crate) id: &'static str,
     pub(crate) description: &'static str,
-    /// Runs once as root inside a fresh sandbox.
+    /// Runs once as root inside a fresh sandbox. The agent itself then runs as the unprivileged
+    /// `node` user of the image (RFC 0001), so install anything it needs system-wide here.
     pub(crate) install: &'static str,
     pub(crate) command: &'static str,
     pub(crate) secrets: &'static [Secret],
     pub(crate) login: Option<Login>,
-    /// Guest path of a pi-format `models.json` listing the host's local model servers.
+    /// Path, relative to the agent user's home, of a pi-format `models.json` listing the host's
+    /// local model servers.
     pub(crate) models_file: Option<&'static str>,
 }
 
@@ -69,7 +72,7 @@ static CODEX: Agent = Agent {
     }],
     // Codex 0.148.0 rewrites auth.json in place (truncate + write), so a link survives refreshes.
     login: Some(Login {
-        dir: "/root/.codex",
+        dir: ".codex",
         file: "auth.json",
     }),
     models_file: None,
@@ -85,10 +88,10 @@ static PI: Agent = Agent {
     secrets: &[],
     // pi 1.4.0 writes auth.json in place under a lock file beside it, so a link survives.
     login: Some(Login {
-        dir: "/root/.pi/agent",
+        dir: ".pi/agent",
         file: "auth.json",
     }),
-    models_file: Some("/root/.pi/agent/models.json"),
+    models_file: Some(".pi/agent/models.json"),
 };
 
 static SHELL: Agent = Agent {

@@ -14,6 +14,8 @@ categories = ["command-line-utilities", "virtualization"]
 anyhow = "1"
 # Already in the lock through microsandbox; named directly to decode `Proxy-Authorization: Basic`.
 base64 = "=0.23.1"
+# Already in the lock through microsandbox; fingerprints git hooks and config (RFC 0001).
+blake3 = "=1.8.7"
 # Already in the lock through microsandbox; `clock` gives local wall-clock times for the Network tab.
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 clap = { version = "4.6", features = ["derive"] }

@@ -71,8 +71,8 @@ msbx agent codex -- --version   # pass arguments through to the agent
 
 | Agent | Command in the VM | Host-side secret | Shared sign-in |
 |---|---|---|---|
-| `codex` | `codex` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `/root/.codex/auth.json` |
-| `pi` | `pi` | none (uses local models on the host) | `/root/.pi/agent/auth.json` |
+| `codex` | `codex` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `~/.codex/auth.json` |
+| `pi` | `pi` | none (uses local models on the host) | `~/.pi/agent/auth.json` |
 | `shell` | `bash` | none | none |
 
 Sandbox settings are applied only when the sandbox is created. To change them, remove it with `msb rm -f <name>` and run `msbx agent` again.
@@ -88,7 +88,7 @@ On macOS, msbx reads each agent secret that is not set in your shell from the Ke
 
 ### Sign in once
 
-Codex "Sign in with ChatGPT" and pi logins are kept on a named volume per agent, `msbx-login-codex` or `msbx-login-pi`, mounted at `/root/.msbx-login` in every sandbox of that agent. The sign-in file in the VM is a link to that volume, so a login or token refresh in one sandbox is seen by all of them, and it survives `msb rm`.
+Codex "Sign in with ChatGPT" and pi logins are kept on a named volume per agent, `msbx-login-codex` or `msbx-login-pi`, mounted at `~/.msbx-login` (the agent user's home, `/home/node`) in every sandbox of that agent. The sign-in file in the VM is a link to that volume, so a login or token refresh in one sandbox is seen by all of them, and it survives `msb rm`.
 
 - Codex: `msbx agent codex -- login --device-auth`, then `msbx agent codex` in any project.
 - pi: run `msbx agent pi`, then `/login`.
@@ -98,7 +98,7 @@ Sandboxes created before this feature have no login volume; msbx prints a note. 
 
 ### pi and local models
 
-Each time `msbx agent pi` starts, msbx writes `/root/.pi/agent/models.json` in the VM from your `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR/models.json`): only providers whose `baseUrl` is on `127.0.0.1`, `localhost`, `[::1]` or `0.0.0.0` are copied, with the host rewritten to `host.microsandbox.internal`. Providers with real cloud keys stay on the host. With no such file, msbx probes Ollama (`127.0.0.1:11434`) and LM Studio (`127.0.0.1:1234`) and lists the models they serve.
+Each time `msbx agent pi` starts, msbx writes `~/.pi/agent/models.json` in the VM from your `~/.pi/agent/models.json` (or `$PI_CODING_AGENT_DIR/models.json`): only providers whose `baseUrl` is on `127.0.0.1`, `localhost`, `[::1]` or `0.0.0.0` are copied, with the host rewritten to `host.microsandbox.internal`. Providers with real cloud keys stay on the host. With no such file, msbx probes Ollama (`127.0.0.1:11434`) and LM Studio (`127.0.0.1:1234`) and lists the models they serve.
 
 ### Control network access
 
@@ -173,9 +173,11 @@ What microsandbox isolates:
 - Only the project folder is mounted from the host filesystem.
 - API keys stay on the host. The VM sees a placeholder, which microsandbox replaces with the real key only on requests to the allowed host.
 
+What msbx adds for git ([RFC 0001](https://finngi.github.io/msbx/rfcs/0001-git-safety.html)): the agent runs as the unprivileged `node` user under microsandbox's `restricted` profile, `.git/hooks`, `.git/info` and `.git/config` are read-only mounts the agent cannot unmount (even as root), msbx only runs git on your Mac with hooks and fsmonitor off, and it warns when the files git executes from changed during or between sessions. Sandboxes created before this keep running as root; recreate them. See [Keep git safe](https://finngi.github.io/msbx/how-to/guard-git.html).
+
 What it leaves open:
 
-- The project folder is writable from the VM. An agent can modify or delete anything in it, including `.git`. Commit or back up first.
+- The project folder is writable from the VM. An agent can modify or delete anything in it, including the history under `.git`. Commit or back up first.
 - Network access follows your policy. The proxy decides by the host name in the TLS handshake or HTTP `Host` header, checked against DNS on your machine; traffic with no name is decided by IP. DNS itself is unrestricted, and an allowed host can still receive project contents.
 - Host services at `host.microsandbox.internal`: only ports 11434 (Ollama) and 1234 (LM Studio), fixed when the sandbox is created.
 - TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
