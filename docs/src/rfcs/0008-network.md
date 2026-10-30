@@ -91,7 +91,7 @@ New sandboxes get the label `msbx.network=proxy`, the proxy `http_connect("127.0
 |---|---|
 | egress deny by default | private networks, loopback, link-local and metadata addresses match nothing |
 | allow host, UDP and TCP port 53 | DNS |
-| allow host, TCP 11434 and 1234 | Ollama and LM Studio; host traffic never reaches the proxy, so this is fixed at create |
+| allow host, TCP on the host ports | `host_ports` in `policy.toml`, default 11434 and 1234 (Ollama and LM Studio); host traffic never reaches the proxy, so this is fixed at create. No ports means no rule, since a rule without ports matches every port ([RFC 0011](0011-info-settings.md)) |
 | allow public, TCP | the proxy decides per host |
 
 `msbx.network` lets the dashboard and CLI tell proxied sandboxes from older ones.
@@ -145,7 +145,8 @@ Written atomically (temp file and rename, mode 600). Hand edits work; unknown ke
 - Port 47447 is baked into every sandbox and cannot change.
 - The host name is only as good as the guest's first bytes. Protocols that send no name are decided by IP.
 - The anti-spoofing check can block a legitimate connection when DNS answers differ between the guest's lookup and the host's (round-robin, CDNs with short TTLs). The log shows `name-mismatch` so you can allow the IP or CIDR.
-- Host access cannot be changed live: it is fixed at create to the model ports.
+- Host access cannot be changed live: it is fixed at create to the configured host ports
+  (`msbx policy host-ports`, [RFC 0011](0011-info-settings.md)).
 
 ## Security
 

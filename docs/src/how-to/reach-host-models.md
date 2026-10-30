@@ -46,10 +46,12 @@ run `msbx agent pi` again after starting it.
 
 ## If it does not connect
 
-- The sandbox must be allowed to reach the host port. Sandboxes created by msbx may reach ports
-  11434 and 1234 on the host and nothing else there; a server on another port needs a sandbox
-  created with that port, which msbx does not offer yet. Sandboxes created before the network
-  policy existed have the whole `host` profile (`network  public + host` on the Overview tab).
+- The sandbox must be allowed to reach the host port. Sandboxes created by msbx may reach the
+  host ports in `policy.toml` (by default 11434 and 1234) and nothing else there. For a server
+  on another port, add it with `msbx policy host-ports 11434 1234 8080` (or `Ctrl-S` in the
+  dashboard), then recreate the sandbox: `i` on its card shows the ports it was created with.
+  Sandboxes created before the network policy existed have the whole `host` profile
+  (`network  public + host` on the Overview tab).
 - `localhost` inside the VM is the VM itself. Use `host.microsandbox.internal` to reach your Mac.
 
 Host access is fixed when the sandbox is created; the network policy does not change it. See

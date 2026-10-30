@@ -11,11 +11,13 @@ use ratatui::widgets::{
     Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap,
 };
 
-use crate::app::{App, CreateField, CreateStage, CreateWizard, Focus, Popup, Tab};
+use crate::app::{
+    App, CreateField, CreateStage, CreateWizard, Focus, Popup, SettingsField, SettingsForm, Tab,
+};
 use crate::input::TextInput;
 use crate::keymap;
 use crate::model::{NetEntry, RuleInfo, SandboxInfo, Status};
-use crate::policy::{Preset, Source};
+use crate::policy::{self, Preset, Source};
 
 const ACCENT: Color = Color::Cyan;
 const CARDS_WIDTH: u16 = 34;
@@ -110,9 +112,9 @@ pub(crate) fn detail_scroll_limit(app: &App, width: u16, height: u16) -> usize {
         .saturating_sub(usize::from(visible))
 }
 
-/// Measure the help viewport with the same popup and row layout used by rendering.
-pub(crate) fn help_scroll_limit(app: &App, width: u16, height: u16) -> usize {
-    if width < 40 || height < 12 || !matches!(app.popup, Some(Popup::Help)) {
+/// Measure the help or info viewport with the same popup and row layout used by rendering.
+pub(crate) fn popup_scroll_limit(app: &App, width: u16, height: u16) -> usize {
+    if width < 40 || height < 12 {
         return 0;
     }
     let area = popup_bounds(Rect::new(0, 0, width, height), 78, height.saturating_sub(2));
@@ -120,9 +122,12 @@ pub(crate) fn help_scroll_limit(app: &App, width: u16, height: u16) -> usize {
         .padding(Padding::horizontal(1))
         .inner(area);
     let [rows, _] = help_regions(inner);
-    keymap::help(app)
-        .len()
-        .saturating_sub(usize::from(rows.height).max(1))
+    let total = match &app.popup {
+        Some(Popup::Help) => keymap::help(app).len(),
+        Some(Popup::Info { name }) => wrap_lines(info_lines(app, name), rows.width).len(),
+        _ => return 0,
+    };
+    total.saturating_sub(usize::from(rows.height).max(1))
 }
 
 fn render_dashboard(frame: &mut Frame, app: &App) {
@@ -712,6 +717,8 @@ fn render_overlay(frame: &mut Frame, app: &App) {
             );
         }
         Some(Popup::Help) => render_help(frame, app),
+        Some(Popup::Info { name }) => render_info(frame, app, name),
+        Some(Popup::Settings(form)) => render_settings(frame, app, form),
         Some(Popup::Preset { index, then_create }) => {
             render_preset(frame, app, *index, *then_create);
         }
@@ -1122,17 +1129,23 @@ fn render_help(frame: &mut Frame, app: &App) {
         78,
         frame.area().height.saturating_sub(2),
     );
-    let [rows, footer] = help_regions(inner);
-    let visible = usize::from(rows.height).max(1);
-    let start = app.help_scroll.min(hints.len().saturating_sub(visible));
     let lines = hints
         .iter()
-        .skip(start)
-        .take(visible)
         .map(|(key, label)| Line::from(vec![format!("{key:<17}").bold(), (*label).into()]))
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), rows);
-    let end = (start + visible).min(hints.len());
+        .collect();
+    render_scrolled_popup(frame, app, inner, lines);
+}
+
+/// Rows from `app.popup_scroll`, clamped so the last page stays full, then the popup's keys and
+/// the visible range.
+fn render_scrolled_popup(frame: &mut Frame, app: &App, inner: Rect, lines: Vec<Line<'static>>) {
+    let [rows, footer] = help_regions(inner);
+    let visible = usize::from(rows.height).max(1);
+    let total = lines.len();
+    let start = app.popup_scroll.min(total.saturating_sub(visible));
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(start).take(visible).collect();
+    frame.render_widget(Paragraph::new(shown), rows);
+    let end = (start + visible).min(total);
     let keys = keymap::hints(app)
         .iter()
         .map(|(key, label)| Line::from(format!("{key} {label}  ")))
@@ -1140,11 +1153,256 @@ fn render_help(frame: &mut Frame, app: &App) {
     frame.render_widget(
         spread(
             keys,
-            Line::from(format!("{}–{end}/{}", start + 1, hints.len())),
+            Line::from(format!("{}–{end}/{total}", start + 1)),
             footer.width,
         ),
         footer,
     );
+}
+
+fn render_info(frame: &mut Frame, app: &App, name: &str) {
+    let inner = popup_area(
+        frame,
+        &format!("Info · {name}"),
+        78,
+        frame.area().height.saturating_sub(2),
+    );
+    let [rows, _] = help_regions(inner);
+    render_scrolled_popup(
+        frame,
+        app,
+        inner,
+        wrap_lines(info_lines(app, name), rows.width),
+    );
+}
+
+/// Everything known about one sandbox, by section. Fields the runtime does not report show `—`.
+fn info_lines(app: &App, name: &str) -> Vec<Line<'static>> {
+    let Some(sandbox) = app.sandboxes.iter().find(|sandbox| sandbox.name == name) else {
+        return vec![Line::from(format!("{name} is no longer listed."))];
+    };
+    let cpus = sandbox
+        .vcpus
+        .map_or_else(|| "—".to_owned(), |count| format!("{count} vCPU"));
+    let cpus = match sandbox.cpu_percent {
+        Some(percent) => format!("{cpus} · {percent:.0}% busy"),
+        None => cpus,
+    };
+    let mut lines = vec![
+        heading("Identity"),
+        row("name", sandbox.name.clone()),
+        row("agent", or_dash(sandbox.agent.clone())),
+        row(
+            "project",
+            or_dash(
+                sandbox
+                    .project
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            ),
+        ),
+        row("status", status_word(sandbox.status).to_owned()),
+        row("created", or_dash(sandbox.created.clone())),
+        row("image", or_dash(sandbox.image.clone())),
+        Line::default(),
+        heading("Resources"),
+        row("cpus", cpus),
+        row("memory", memory(sandbox, " / ")),
+        row("disk", disk(sandbox)),
+        row("uptime", or_dash(sandbox.uptime.map(format_duration))),
+        row("traffic", or_dash(traffic(sandbox))),
+        Line::default(),
+        heading("Security"),
+        row("user", or_dash(sandbox.user.clone())),
+        row(
+            "profile",
+            match sandbox.restricted {
+                Some(true) => "restricted".to_owned(),
+                Some(false) => "default".to_owned(),
+                None => "—".to_owned(),
+            },
+        ),
+        row(
+            "git guard",
+            if sandbox.git_guarded { "yes" } else { "no" }.to_owned(),
+        ),
+        Line::default(),
+        heading("Network"),
+    ];
+    lines.extend(network_info(app, sandbox));
+    lines.push(Line::default());
+    lines.push(heading("Mounts and secrets"));
+    let mounts = if sandbox.mounts.is_empty() {
+        vec!["—".to_owned()]
+    } else {
+        sandbox.mounts.clone()
+    };
+    for (index, mount) in mounts.into_iter().enumerate() {
+        lines.push(row(if index == 0 { "mounts" } else { "" }, mount));
+    }
+    let secrets = if sandbox.secrets.is_empty() {
+        "none".to_owned()
+    } else {
+        format!("{} (names only)", sandbox.secrets.join(", "))
+    };
+    lines.push(row("secrets", secrets));
+    lines
+}
+
+/// Proxy, preset and the host ports applied at create next to the ones configured now.
+fn network_info(app: &App, sandbox: &SandboxInfo) -> Vec<Line<'static>> {
+    if !sandbox.proxied {
+        return vec![
+            row(
+                "proxy",
+                format!("no · msb policy {}", or_dash(sandbox.network.clone())),
+            ),
+            row("preset", "— (policy.toml does not apply)".to_owned()),
+        ];
+    }
+    let rules = app
+        .rules
+        .iter()
+        .filter(|rule| rule.sandbox.as_deref() == Some(sandbox.name.as_str()))
+        .count();
+    let mut lines = vec![
+        row("proxy", "yes · policy.toml decides per host".to_owned()),
+        row("preset", preset_word(app.policy).to_owned()),
+    ];
+    match (&sandbox.host_ports, &app.host_ports) {
+        (None, _) => lines.push(row("host ports", "unknown".to_owned())),
+        (Some(applied), configured) => {
+            lines.push(row(
+                "host ports",
+                format!("{} (set at create)", policy::port_list(applied)),
+            ));
+            match configured {
+                Some(now) if now != applied => {
+                    lines.push(
+                        row(
+                            "configured",
+                            format!("{} · differs", policy::port_list(now)),
+                        )
+                        .fg(Color::Yellow),
+                    );
+                    lines.push(
+                        row("", format!("recreate to apply: msb rm -f {}", sandbox.name))
+                            .fg(Color::Yellow),
+                    );
+                }
+                Some(_) => lines.push(row("configured", "the same".to_owned())),
+                None => lines.push(row("configured", "— (no policy.toml)".to_owned())),
+            }
+        }
+    }
+    lines.push(row("rules", format!("{rules} for this sandbox only")));
+    lines
+}
+
+fn heading(title: &str) -> Line<'static> {
+    Line::from(title.to_owned().fg(ACCENT).bold())
+}
+
+fn disk(sandbox: &SandboxInfo) -> String {
+    match (sandbox.disk_used_bytes, sandbox.disk_free_bytes) {
+        (None, None) => "—".to_owned(),
+        (used, free) => format!(
+            "{} used · {} free",
+            or_dash(used.map(format_bytes)),
+            or_dash(free.map(format_bytes))
+        ),
+    }
+}
+
+fn render_settings(frame: &mut Frame, app: &App, form: &SettingsForm) {
+    let inner = popup_area(frame, "Settings", 72, 16);
+    let [
+        intro,
+        preset_label,
+        presets,
+        describe,
+        _,
+        ports_label,
+        input,
+        note,
+        error_area,
+        hint,
+    ] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let intro_text = if app.policy.is_none() {
+        "policy.toml does not exist yet; saving creates it."
+    } else {
+        "Defaults for msbx sandboxes, saved in policy.toml."
+    };
+    frame.render_widget(
+        Paragraph::new(intro_text).dim().wrap(Wrap { trim: false }),
+        intro,
+    );
+    let on_preset = form.field == SettingsField::Preset;
+    frame.render_widget(
+        Line::from(field_label("Default network preset", on_preset)),
+        preset_label,
+    );
+    let mut choices = vec![Span::from("  ")];
+    for (index, preset) in Preset::ALL.iter().enumerate() {
+        choices.push(if index == form.preset {
+            format!("[{}]", preset.title()).fg(ACCENT).bold()
+        } else {
+            format!(" {} ", preset.title()).into()
+        });
+        choices.push("  ".into());
+    }
+    frame.render_widget(Line::from(choices), presets);
+    let chosen = Preset::ALL
+        .get(form.preset)
+        .copied()
+        .unwrap_or(Preset::Balanced);
+    let [_, describe] =
+        Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(describe);
+    frame.render_widget(
+        Paragraph::new(chosen.describe())
+            .dim()
+            .wrap(Wrap { trim: false }),
+        describe,
+    );
+    let on_ports = form.field == SettingsField::HostPorts;
+    frame.render_widget(
+        Line::from(field_label(
+            "Host ports on your Mac (host.microsandbox.internal)",
+            on_ports,
+        )),
+        ports_label,
+    );
+    render_input(frame, input, &form.host_ports, "> ", on_ports);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Comma or space separated; empty allows none."),
+            Line::from("Applies to new sandboxes; recreate existing ones."),
+        ])
+        .dim()
+        .wrap(Wrap { trim: false }),
+        note,
+    );
+    if let Some(message) = &form.error {
+        frame.render_widget(
+            Paragraph::new(message.as_str())
+                .red()
+                .wrap(Wrap { trim: false }),
+            error_area,
+        );
+    }
+    render_footer(frame, app, hint);
 }
 
 fn render_preset(frame: &mut Frame, app: &App, selected: usize, then_create: bool) {
@@ -1486,13 +1744,19 @@ mod tests {
             agent: None,
             project: None,
             image: None,
+            created: None,
             vcpus: None,
             cpu_percent: None,
             memory_bytes: None,
             memory_limit_bytes: None,
+            disk_used_bytes: None,
+            disk_free_bytes: None,
             uptime: None,
             network: None,
             proxied: false,
+            host_ports: None,
+            user: None,
+            restricted: None,
             git_guarded: false,
             rx_bytes: None,
             tx_bytes: None,
@@ -1533,13 +1797,19 @@ mod tests {
             agent: Some("codex".to_owned()),
             project: Some(PathBuf::from("/home/dev/dev/xap/api")),
             image: Some("node:24-bookworm-slim".to_owned()),
+            created: Some("2026-10-29 11:40".to_owned()),
             vcpus: Some(18),
             cpu_percent: Some(18.0),
             memory_bytes: Some(GIB * 21 / 10),
             memory_limit_bytes: Some(GIB * 32),
+            disk_used_bytes: Some(GIB * 12 / 10),
+            disk_free_bytes: Some(GIB * 88 / 10),
             uptime: Some(Duration::from_secs(12 * 60)),
             network: Some("public".to_owned()),
             proxied: true,
+            host_ports: Some(vec![1234, 11434]),
+            user: Some("node".to_owned()),
+            restricted: Some(true),
             git_guarded: true,
             rx_bytes: Some(48 * 1024 * 1024 + 200 * 1024),
             tx_bytes: Some(3 * 1024 * 1024 + 100 * 1024),
@@ -1941,7 +2211,7 @@ mod tests {
     fn snapshot_help_scrolled() -> anyhow::Result<()> {
         let mut app = full_network();
         app.popup = Some(Popup::Help);
-        app.help_scroll = 99;
+        app.popup_scroll = 99;
         snapshots("help_scrolled", &app)
     }
 
@@ -2120,30 +2390,150 @@ mod tests {
     fn help_at_bottom_reverses_after_one_up() -> anyhow::Result<()> {
         let mut app = full_network();
         press(&mut app, crossterm::event::KeyCode::Char('?'));
-        app.set_help_scroll_limit(help_scroll_limit(&app, 60, 20));
+        app.set_popup_scroll_limit(popup_scroll_limit(&app, 60, 20));
         for _ in 0..30 {
             press(&mut app, crossterm::event::KeyCode::Down);
         }
         let bottom = draw(&app, 60, 20)?.backend().to_string();
-        assert!(bottom.contains("5–19/19"), "{bottom}");
+        assert!(bottom.contains("6–20/20"), "{bottom}");
         press(&mut app, crossterm::event::KeyCode::Up);
         let previous = draw(&app, 60, 20)?.backend().to_string();
-        assert!(previous.contains("4–18/19"), "{previous}");
-        assert_eq!(app.help_scroll, 3);
-        app.set_help_scroll_limit(help_scroll_limit(&app, 100, 30));
-        assert_eq!(app.help_scroll, 0);
+        assert!(previous.contains("5–19/20"), "{previous}");
+        assert_eq!(app.popup_scroll, 4);
+        app.set_popup_scroll_limit(popup_scroll_limit(&app, 100, 30));
+        assert_eq!(app.popup_scroll, 0);
         let resized = draw(&app, 100, 30)?.backend().to_string();
-        assert!(resized.contains("1–19/19"), "{resized}");
-        app.set_help_scroll_limit(help_scroll_limit(&app, 60, 16));
+        assert!(resized.contains("1–20/20"), "{resized}");
+        app.set_popup_scroll_limit(popup_scroll_limit(&app, 60, 16));
         for _ in 0..30 {
             press(&mut app, crossterm::event::KeyCode::Down);
         }
-        assert_eq!(app.help_scroll, 8);
-        app.set_help_scroll_limit(help_scroll_limit(&app, 60, 20));
-        assert_eq!(app.help_scroll, 4);
+        assert_eq!(app.popup_scroll, 9);
+        app.set_popup_scroll_limit(popup_scroll_limit(&app, 60, 20));
+        assert_eq!(app.popup_scroll, 5);
         press(&mut app, crossterm::event::KeyCode::Up);
-        assert_eq!(app.help_scroll, 3);
+        assert_eq!(app.popup_scroll, 4);
         Ok(())
+    }
+
+    fn ctrl(app: &mut App, letter: char) {
+        let _ = app.update(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(letter),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+    }
+
+    /// codex-api's info, created with the default ports while policy.toml now says 1234, 8080.
+    fn with_info() -> App {
+        let mut app = populated();
+        app.host_ports = Some(vec![1234, 8080]);
+        app.set_rules(vec![RuleInfo {
+            target: "telemetry.example.com".into(),
+            source: Source::Sandbox,
+            sandbox: Some("codex-api".into()),
+            allowed: false,
+        }]);
+        press(&mut app, crossterm::event::KeyCode::Char('i'));
+        app
+    }
+
+    #[test]
+    fn snapshot_info() -> anyhow::Result<()> {
+        snapshots("info", &with_info())
+    }
+
+    #[test]
+    fn snapshot_info_bottom() -> anyhow::Result<()> {
+        let mut app = with_info();
+        app.popup_scroll = usize::MAX;
+        snapshots("info_bottom", &app)
+    }
+
+    #[test]
+    fn snapshot_info_foreign() -> anyhow::Result<()> {
+        let mut app = populated();
+        app.selected = 2;
+        press(&mut app, crossterm::event::KeyCode::Char('i'));
+        snapshots("info_foreign", &app)
+    }
+
+    #[test]
+    fn info_scroll_limit_reaches_the_last_line_and_reverses() -> anyhow::Result<()> {
+        let mut app = with_info();
+        app.set_popup_scroll_limit(popup_scroll_limit(&app, 60, 20));
+        for _ in 0..60 {
+            press(&mut app, crossterm::event::KeyCode::Down);
+        }
+        let bottom = draw(&app, 60, 20)?.backend().to_string();
+        assert!(bottom.contains("secrets"), "{bottom}");
+        let limit = app.popup_scroll;
+        assert!(limit > 0, "the info outgrows 60x20");
+        press(&mut app, crossterm::event::KeyCode::Char('k'));
+        assert_eq!(app.popup_scroll, limit - 1, "one step back moves at once");
+        app.set_popup_scroll_limit(popup_scroll_limit(&app, 100, 40));
+        assert_eq!(app.popup_scroll, 0, "everything fits once the screen grows");
+        Ok(())
+    }
+
+    #[test]
+    fn info_flags_port_drift_and_settings_errors_by_colour() -> anyhow::Result<()> {
+        let app = with_info();
+        let terminal = draw(&app, 100, 40)?;
+        let buffer = terminal.backend().buffer();
+        let text = terminal.backend().to_string();
+        assert!(text.contains("recreate to apply"), "{text}");
+        let drift = buffer
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == "8" && cell.fg == Color::Yellow);
+        assert!(drift.is_some(), "the configured ports row is yellow");
+
+        let mut app = populated();
+        ctrl(&mut app, 's');
+        press(&mut app, crossterm::event::KeyCode::Tab);
+        press(&mut app, crossterm::event::KeyCode::Char('x'));
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        let terminal = draw(&app, 80, 24)?;
+        let text = terminal.backend().to_string();
+        assert!(text.contains("invalid host port"), "{text}");
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "i" && cell.fg == Color::Red),
+            "the error is red"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_settings() -> anyhow::Result<()> {
+        let mut app = populated();
+        app.host_ports = Some(vec![1234, 11434]);
+        ctrl(&mut app, 's');
+        snapshots("settings", &app)
+    }
+
+    #[test]
+    fn snapshot_settings_error() -> anyhow::Result<()> {
+        let mut app = populated();
+        app.host_ports = Some(vec![1234, 11434]);
+        ctrl(&mut app, 's');
+        press(&mut app, crossterm::event::KeyCode::Tab);
+        press(&mut app, crossterm::event::KeyCode::Char(','));
+        press(&mut app, crossterm::event::KeyCode::Char('0'));
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        snapshots("settings_error", &app)
+    }
+
+    #[test]
+    fn snapshot_settings_no_policy() -> anyhow::Result<()> {
+        let mut app = populated();
+        app.set_network(None, Vec::new());
+        ctrl(&mut app, 's');
+        snapshots("settings_no_policy", &app)
     }
 
     #[test]

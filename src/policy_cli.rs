@@ -2,10 +2,12 @@
 //! first-run preset question. Rendering is pure (returns `String`) so it is tested; `emit` is
 //! the one place that writes to stdout.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
 
+use crate::model::SandboxInfo;
 use crate::netlog::{self, Entry};
 use crate::paths::Dirs;
 use crate::policy::{self, Policy, Preset, Target, Verdict};
@@ -97,6 +99,67 @@ pub(crate) fn set_preset(dirs: &Dirs, preset: Preset) -> Result<String> {
     policy.preset = preset;
     policy::save(&dirs.policy_file(), &policy)?;
     Ok(format!("preset is now {preset}\n"))
+}
+
+/// `msbx policy host-ports`: the Mac ports new sandboxes may reach.
+pub(crate) fn show_host_ports(policy: &Policy) -> String {
+    format!("host ports {}\n", host_port_words(&policy.host_ports))
+}
+
+/// `msbx policy host-ports PORT…` or `--none`: saves the ports and returns the message and the
+/// ports as saved. The proxy needs no reload: host traffic never reaches it, so the ports only
+/// take effect in the static policy of sandboxes created from now on.
+pub(crate) fn set_host_ports(dirs: &Dirs, ports: &str) -> Result<(String, Vec<u16>)> {
+    let ports = policy::parse_host_ports(ports)?;
+    let mut policy = load_required(dirs)?;
+    policy.host_ports.clone_from(&ports);
+    policy::save(&dirs.policy_file(), &policy)?;
+    let text = format!(
+        "host ports are now {}\nthis applies to sandboxes created from now on; existing \
+         sandboxes keep the ports they were created with\n",
+        host_port_words(&ports)
+    );
+    Ok((text, ports))
+}
+
+fn host_port_words(ports: &[u16]) -> String {
+    if ports.is_empty() {
+        "none (DNS only)".to_owned()
+    } else {
+        policy::port_list(ports)
+    }
+}
+
+/// The msbx sandboxes created with other host ports than `ports`, with the commands that
+/// recreate each one; empty when none differ.
+pub(crate) fn host_port_drift(sandboxes: &[SandboxInfo], ports: &[u16]) -> String {
+    let stale: Vec<&SandboxInfo> = sandboxes
+        .iter()
+        .filter(|sandbox| sandbox.agent.is_some() && sandbox.proxied)
+        .filter(|sandbox| sandbox.host_ports.as_deref() != Some(ports))
+        .collect();
+    if stale.is_empty() {
+        return String::new();
+    }
+    let mut out = "these sandboxes have other host ports; recreate one to apply:\n".to_owned();
+    for sandbox in stale {
+        let created = sandbox
+            .host_ports
+            .as_deref()
+            .map_or_else(|| "unknown".to_owned(), host_port_words);
+        let project = sandbox
+            .project
+            .as_ref()
+            .map_or_else(|| "PATH".to_owned(), |path| path.display().to_string());
+        let _ = writeln!(
+            out,
+            "  {} ({created}): msb rm -f {} && msbx agent {} {project}",
+            sandbox.name,
+            sandbox.name,
+            sandbox.agent.as_deref().unwrap_or("AGENT"),
+        );
+    }
+    out
 }
 
 /// The effective rules, as a table with their source.
@@ -379,6 +442,104 @@ mod tests {
         );
         assert!(ask_preset("9\n".as_bytes(), &mut Vec::new()).is_err());
         Ok(())
+    }
+
+    fn listed(name: &str, agent: Option<&str>, host_ports: Option<Vec<u16>>) -> SandboxInfo {
+        SandboxInfo {
+            name: name.to_owned(),
+            status: crate::model::Status::Running,
+            agent: agent.map(str::to_owned),
+            project: agent.map(|_| std::path::PathBuf::from("/work/api")),
+            image: None,
+            created: None,
+            vcpus: None,
+            cpu_percent: None,
+            memory_bytes: None,
+            memory_limit_bytes: None,
+            disk_used_bytes: None,
+            disk_free_bytes: None,
+            uptime: None,
+            network: None,
+            proxied: agent.is_some(),
+            host_ports,
+            user: None,
+            restricted: None,
+            git_guarded: true,
+            rx_bytes: None,
+            tx_bytes: None,
+            secrets: Vec::new(),
+            mounts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn drift_names_msbx_sandboxes_with_other_ports_and_how_to_recreate() {
+        let sandboxes = [
+            listed("codex-api", Some("codex"), Some(vec![1234, 11434])),
+            listed("pi-api", Some("pi"), Some(vec![8080])),
+            listed("shell-api", Some("shell"), None),
+            listed("foreign", None, None),
+        ];
+        assert_eq!(
+            host_port_drift(&sandboxes, &[8080]),
+            "these sandboxes have other host ports; recreate one to apply:\n  \
+             codex-api (1234, 11434): msb rm -f codex-api && msbx agent codex /work/api\n  \
+             shell-api (unknown): msb rm -f shell-api && msbx agent shell /work/api\n"
+        );
+        assert!(
+            host_port_drift(&sandboxes[1..2], &[8080]).is_empty(),
+            "nothing to say when all match"
+        );
+        assert!(
+            host_port_drift(&sandboxes, &[]).contains("pi-api (8080)"),
+            "clearing the ports differs from every list"
+        );
+    }
+
+    #[test]
+    fn host_ports_show_and_set_through_the_file() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("msbx-host-ports-{}", std::process::id()));
+        let dirs = Dirs {
+            config: root.join("config"),
+            state: root.join("state"),
+        };
+        let outcome = (|| -> Result<()> {
+            assert!(set_host_ports(&dirs, "8080").is_err(), "needs init");
+            init(&dirs, Preset::Balanced)?;
+            assert_eq!(
+                show_host_ports(&load_required(&dirs)?),
+                "host ports 1234, 11434\n"
+            );
+            let (text, ports) = set_host_ports(&dirs, "8080,1234 8080")?;
+            assert_eq!(ports, [1234, 8080]);
+            assert!(
+                text.starts_with("host ports are now 1234, 8080\n"),
+                "{text}"
+            );
+            assert!(text.contains("created from now on"), "{text}");
+            assert_eq!(load_required(&dirs)?.host_ports, [1234, 8080]);
+            assert!(set_host_ports(&dirs, "http").is_err());
+            assert_eq!(
+                load_required(&dirs)?.host_ports,
+                [1234, 8080],
+                "a bad value saves nothing"
+            );
+            let (text, ports) = set_host_ports(&dirs, "")?;
+            assert_eq!(ports, [] as [u16; 0]);
+            assert!(
+                text.starts_with("host ports are now none (DNS only)"),
+                "{text}"
+            );
+            assert_eq!(
+                show_host_ports(&load_required(&dirs)?),
+                "host ports none (DNS only)\n"
+            );
+            Ok(())
+        })();
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        outcome
     }
 
     #[test]

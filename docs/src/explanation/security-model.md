@@ -18,8 +18,9 @@ and [security policy](https://github.com/superradcompany/microsandbox/blob/main/
 - Network access follows your policy (see below). With the `open` preset the VM can reach the
   public internet and send project contents anywhere. With any preset, an allowed host can
   still receive data.
-- Host services: only ports 11434 (Ollama) and 1234 (LM Studio) at
-  `host.microsandbox.internal`, fixed when the sandbox is created.
+- Host services: only the host ports in `policy.toml` at `host.microsandbox.internal` (by
+  default 11434 for Ollama and 1234 for LM Studio), fixed when the sandbox is created. Each
+  port you add exposes that Mac service to every sandbox created afterwards.
 - TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA
   to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
 - Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox
@@ -46,7 +47,7 @@ What it does not stop:
 
 - DNS: the sandbox can resolve any name through microsandbox's gateway.
 - Data leaving through an allowed host, such as `github.com` under `balanced`.
-- Host access beyond the two model ports being fixed at create; the proxy cannot change it,
+- Host access to the configured host ports, fixed at create; the proxy cannot change it,
   because traffic to your machine bypasses the proxy.
 - Traffic with no name in its first bytes (plain TCP, or a server-first protocol such as
   SSH) is decided by the address alone.

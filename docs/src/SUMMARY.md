@@ -39,3 +39,4 @@
   - [0008 Network](rfcs/0008-network.md)
   - [0009 Ports](rfcs/0009-ports.md)
   - [0010 Dashboard](rfcs/0010-dashboard.md)
+  - [0011 Host ports, info and settings](rfcs/0011-info-settings.md)
