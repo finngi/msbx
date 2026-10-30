@@ -45,6 +45,7 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Fixed
 
+- `msbx agent pi` on a new sandbox failed with `mkdir: cannot create directory '/home/node/.pi': Permission denied`: folders above the login file were left owned by root. Existing sandboxes are repaired on the next launch.
 - `msbx proxy stop` no longer drops connections logged just before it stopped.
 
 [unreleased]: https://github.com/finngi/msbx/commits/main
