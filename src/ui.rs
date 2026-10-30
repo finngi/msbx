@@ -1,113 +1,192 @@
-//! Renders [`App`] to a ratatui frame. Pure: reads state, draws, nothing else.
+//! Pure dashboard rendering: state enters as data; no IO or terminal lifecycle lives here.
 
 use std::path::Path;
 use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph};
+use ratatui::widgets::{
+    Block, BorderType, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Wrap,
+};
 
-use crate::app::{App, Popup, Tab};
-use crate::model::{NetEntry, SandboxInfo, Status};
-use crate::policy::Preset;
+use crate::app::{App, CreateField, CreateStage, CreateWizard, Focus, Popup, Tab};
+use crate::input::TextInput;
+use crate::keymap;
+use crate::model::{NetEntry, RuleInfo, SandboxInfo, Status};
+use crate::policy::{Preset, Source};
 
 const ACCENT: Color = Color::Cyan;
 const CARDS_WIDTH: u16 = 34;
 const CARD_HEIGHT: u16 = 7;
 const NEW_CARD_HEIGHT: u16 = 3;
-const LABEL_WIDTH: usize = 9;
-const KEYS: [(&str, &str); 9] = [
-    ("↑↓", "select"),
-    ("tab", "pane"),
-    ("↵", "attach"),
-    ("c", "create"),
-    ("s", "start/stop"),
-    ("x", "shell"),
-    ("r", "remove"),
-    ("?", "help"),
-    ("q", "quit"),
-];
-/// Keys that only work on the Network tab.
-const NETWORK_KEYS: [(&str, &str); 5] = [
-    ("←→", "row"),
-    ("a", "allow"),
-    ("A", "allow all"),
-    ("d", "deny"),
-    ("p", "preset"),
-];
+const LABEL_WIDTH: usize = 11;
 
 pub(crate) fn render(frame: &mut Frame, app: &App) {
-    let [header, _, body, footer] = frame.area().layout(&Layout::vertical([
+    let area = frame.area();
+    if area.width < 40 || area.height < 12 {
+        frame.render_widget(
+            Paragraph::new("Resize to at least 40x12\nq / Ctrl-C quit"),
+            area,
+        );
+    } else {
+        render_dashboard(frame, app);
+    }
+    if app.no_color {
+        frame
+            .buffer_mut()
+            .set_style(area, Style::new().fg(Color::Reset).bg(Color::Reset));
+    }
+}
+
+fn dashboard_regions(area: Rect, status: bool) -> [Rect; 5] {
+    Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
-        Constraint::Fill(1),
+        Constraint::Min(0),
+        Constraint::Length(u16::from(status)),
         Constraint::Length(1),
-    ]));
-    render_header(frame, header);
-    let [cards, _, detail] = body.layout(&Layout::horizontal([
+    ])
+    .areas(area)
+}
+
+fn panel_regions(area: Rect) -> [Rect; 3] {
+    Layout::horizontal([
         Constraint::Length(CARDS_WIDTH),
         Constraint::Length(2),
-        Constraint::Fill(1),
-    ]));
-    render_cards(frame, app, cards);
-    render_detail(frame, app, detail);
-    render_footer(frame, app, footer);
-    match &app.popup {
-        Some(Popup::Create { agent_index }) => render_create(frame, app, *agent_index),
-        Some(Popup::ConfirmRemove { name }) => render_confirm_remove(frame, name),
-        Some(Popup::Help) => render_help(frame),
-        Some(Popup::Preset { index, then_create }) => render_preset(frame, *index, *then_create),
-        None => {}
+        Constraint::Min(1),
+    ])
+    .areas(area)
+}
+
+fn pane_regions(inner: Rect) -> [Rect; 4] {
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner)
+}
+
+/// Pure geometry shared with the IO loop, so wrapping and screen size bound state scrolling.
+pub(crate) fn detail_scroll_limit(app: &App, width: u16, height: u16) -> usize {
+    if width < 40 || height < 12 {
+        return 0;
     }
+    let [_, _, body, _, _] =
+        dashboard_regions(Rect::new(0, 0, width, height), app.status_line.is_some());
+    let panel = if !app.full_network && width >= 100 {
+        let [_, _, detail] = panel_regions(body);
+        detail
+    } else {
+        body
+    };
+    let [_, _, _, content] = pane_regions(Block::bordered().inner(panel));
+    let mut visible = content.height;
+    let lines = match app.tab {
+        Tab::Overview => app
+            .selected_sandbox()
+            .map_or_else(Vec::new, |sandbox| overview(sandbox, app.policy)),
+        Tab::Logs => app.logs.iter().cloned().map(Line::from).collect(),
+        Tab::Network => {
+            let Some(entry) = app
+                .selected_network()
+                .filter(|entry| app.is_expanded(entry))
+            else {
+                return 0;
+            };
+            let lines = connection_details(entry, content.width);
+            if lines.len() > usize::from(visible) {
+                visible = visible.saturating_sub(1);
+            }
+            lines
+        }
+        Tab::Rules => return 0,
+    };
+    wrap_lines(lines, content.width)
+        .len()
+        .saturating_sub(usize::from(visible))
+}
+
+/// Measure the help viewport with the same popup and row layout used by rendering.
+pub(crate) fn help_scroll_limit(app: &App, width: u16, height: u16) -> usize {
+    if width < 40 || height < 12 || !matches!(app.popup, Some(Popup::Help)) {
+        return 0;
+    }
+    let area = popup_bounds(Rect::new(0, 0, width, height), 78, height.saturating_sub(2));
+    let inner = Block::bordered()
+        .padding(Padding::horizontal(1))
+        .inner(area);
+    let [rows, _] = help_regions(inner);
+    keymap::help(app)
+        .len()
+        .saturating_sub(usize::from(rows.height).max(1))
+}
+
+fn render_dashboard(frame: &mut Frame, app: &App) {
+    let [header, _, body, status, footer] =
+        dashboard_regions(frame.area(), app.status_line.is_some());
+    render_header(frame, header);
+    if app.full_network {
+        render_full_network(frame, app, body);
+    } else if body.width < 100 {
+        match app.focus {
+            Focus::Cards => render_cards(frame, app, body),
+            Focus::Detail => render_detail(frame, app, body),
+        }
+    } else {
+        let [cards, _, detail] = panel_regions(body);
+        render_cards(frame, app, cards);
+        render_detail(frame, app, detail);
+    }
+    if let Some(message) = &app.status_line {
+        frame.render_widget(Paragraph::new(message.as_str()).yellow(), status);
+    }
+    render_footer(frame, app, footer);
+    render_overlay(frame, app);
 }
 
 fn render_header(frame: &mut Frame, area: Rect) {
     let left = vec![
         Line::from("msbx".bold()),
-        Line::from("   microVM sandboxes for coding agents · microsandbox".dim()),
+        Line::from("   microVM sandboxes for coding agents".dim()),
     ];
     let right = Line::from(vec!["?".bold(), " help".dim()]);
     frame.render_widget(spread(left, right, area.width), area);
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let hint = |(key, label): &(&'static str, &'static str)| {
-        Line::from(vec![key.bold(), format!(" {label}  ").dim()])
-    };
-    let hints = if app.tab == Tab::Network {
-        KEYS[..2]
-            .iter()
-            .chain(&NETWORK_KEYS)
-            .chain(&KEYS[7..])
-            .map(hint)
-            .collect()
+    let hints = keymap::hints(app);
+    let recovery = if app.popup.is_some() || app.searching {
+        hints.iter().find(|(key, _)| key.contains("Esc")).copied()
     } else {
-        KEYS.iter().map(hint).collect()
+        hints.iter().find(|(key, _)| *key == "?").copied()
     };
-    let status = app
-        .status_line
-        .as_deref()
-        .map(|line| Line::from(line.to_owned().yellow()))
-        .unwrap_or_default();
-    frame.render_widget(spread(hints, status, area.width), area);
+    let right = recovery.map_or_else(Line::default, |(key, label)| {
+        Line::from(format!("{key} {label}"))
+    });
+    let chunks = hints
+        .iter()
+        .filter(|hint| Some(**hint) != recovery)
+        .map(|(key, label)| Line::from(vec![(*key).bold(), format!(" {label}  ").dim()]))
+        .collect();
+    frame.render_widget(spread(chunks, right, area.width), area);
 }
 
-/// Left chunks and a right part on one line. Whole left chunks are dropped when space runs
-/// out, keeping a two-column gap, so a hint is never cut in half.
+/// Keep complete hint chunks and reserve the right-hand recovery action.
 fn spread<'a>(left: Vec<Line<'a>>, right: Line<'a>, width: u16) -> Line<'a> {
     let right_width = right.width();
-    let gap = if right_width == 0 { 0 } else { 2 };
+    let gap = usize::from(right_width > 0) * 2;
     let left_room = usize::from(width).saturating_sub(right_width + gap);
     let mut spans = Vec::new();
     let mut used = 0;
     for chunk in left {
-        let chunk_width = chunk.width();
-        if used + chunk_width > left_room {
+        if used + chunk.width() > left_room {
             break;
         }
-        used += chunk_width;
+        used += chunk.width();
         spans.extend(chunk.spans);
     }
     spans.push(
@@ -118,19 +197,39 @@ fn spread<'a>(left: Vec<Line<'a>>, right: Line<'a>, width: u16) -> Line<'a> {
     Line::from(spans)
 }
 
+fn pane(title: &str, focused: bool) -> Block<'static> {
+    let marker = if focused { ">" } else { " " };
+    Block::bordered()
+        .title(format!(" {marker} {title} "))
+        .border_style(Style::new().fg(if focused { ACCENT } else { Color::DarkGray }))
+}
+
 fn render_cards(frame: &mut Frame, app: &App, area: Rect) {
-    let mut y = area.y;
-    for index in first_visible_card(app, area.height)..=app.sandboxes.len() {
+    let block = pane("Sandboxes", app.focus == Focus::Cards);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut y = inner.y;
+    for index in first_visible_card(app, inner.height)..=app.sandboxes.len() {
         let height = card_height(app, index);
-        if y + height > area.bottom() {
+        if y.saturating_add(height) > inner.bottom() {
             break;
         }
-        let card = Rect::new(area.x, y, area.width, height);
-        match app.sandboxes.get(index) {
-            Some(sandbox) => render_card(frame, app, sandbox, index == app.selected, card),
-            None => render_new_card(frame, index == app.selected, card),
+        let card = Rect::new(inner.x, y, inner.width, height);
+        if let Some(sandbox) = app.sandboxes.get(index) {
+            render_card(frame, app, sandbox, index == app.selected, card);
+        } else {
+            render_new_card(frame, index == app.selected, card);
         }
         y += height;
+    }
+    if app.sandboxes.is_empty() {
+        let hint = Rect::new(inner.x, y, inner.width, inner.bottom().saturating_sub(y));
+        frame.render_widget(
+            Paragraph::new("No sandboxes yet.\nPress c or Enter to choose an agent and workspace.")
+                .wrap(Wrap { trim: false })
+                .dim(),
+            hint,
+        );
     }
 }
 
@@ -142,14 +241,13 @@ fn card_height(app: &App, index: usize) -> u16 {
     }
 }
 
-/// Scrolls just far enough that the selected card fits at the bottom.
 fn first_visible_card(app: &App, height: u16) -> usize {
     let mut first = 0;
     while first < app.selected {
-        let needed: u16 = (first..=app.selected)
-            .map(|index| card_height(app, index))
+        let needed: usize = (first..=app.selected)
+            .map(|index| usize::from(card_height(app, index)))
             .sum();
-        if needed <= height {
+        if needed <= usize::from(height) {
             break;
         }
         first += 1;
@@ -157,10 +255,9 @@ fn first_visible_card(app: &App, height: u16) -> usize {
     first
 }
 
-fn card_block<'a>(selected: bool) -> Block<'a> {
-    let colour = if selected { ACCENT } else { Color::DarkGray };
+fn card_block(selected: bool) -> Block<'static> {
     Block::bordered()
-        .border_style(Style::new().fg(colour))
+        .border_style(Style::new().fg(if selected { ACCENT } else { Color::DarkGray }))
         .padding(Padding::horizontal(1))
 }
 
@@ -169,27 +266,899 @@ fn render_card(frame: &mut Frame, app: &App, sandbox: &SandboxInfo, selected: bo
     let width = block.inner(area).width;
     let (symbol, colour) = status_symbol(sandbox.status);
     let agent = Line::from(sandbox.agent.clone().unwrap_or_else(|| "—".into()));
-    let enter_hint = match (selected, &sandbox.agent) {
-        (false, _) => Line::default(),
-        (true, Some(_)) => Line::from("↵ attach".dim()),
-        (true, None) => Line::from("↵ shell".dim()),
+    let hint = if selected && app.focus == Focus::Cards {
+        Line::from("↵ attach".dim())
+    } else {
+        Line::default()
     };
     let project = sandbox.project.as_deref().map_or_else(
         || "—".into(),
         |path| shorten_home(path, app.home.as_deref()),
     );
+    let marker = if selected { "▸ " } else { "" };
     let lines = vec![
         Line::from(vec![
+            marker.into(),
             symbol.fg(colour),
             " ".into(),
             sandbox.name.clone().bold(),
         ]),
-        spread(vec![agent], enter_hint, width),
+        spread(vec![agent], hint, width),
         Line::from(project.dim()),
         card_metrics(sandbox),
         action_row(sandbox.status),
     ];
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_new_card(frame: &mut Frame, selected: bool, area: Rect) {
+    let block = card_block(selected).border_type(BorderType::LightDoubleDashed);
+    let marker = if selected { "▸ " } else { "" };
+    frame.render_widget(
+        Paragraph::new(format!("{marker}+ new sandbox  (c)"))
+            .centered()
+            .block(block),
+        area,
+    );
+}
+
+fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
+    let block = pane("Details", app.focus == Focus::Detail);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let Some(sandbox) = app.selected_sandbox() else {
+        let hint = if app.sandboxes.is_empty() {
+            "No sandboxes yet.\nPress c to create one."
+        } else {
+            "Press Enter or c to create a sandbox,\nor ↑ to choose one."
+        };
+        frame.render_widget(Paragraph::new(hint).wrap(Wrap { trim: false }).dim(), inner);
+        return;
+    };
+    let [title, tabs, _, content] = pane_regions(inner);
+    frame.render_widget(Line::from(sandbox.name.clone().bold()), title);
+    frame.render_widget(tab_line(app.tab, false), tabs);
+    match app.tab {
+        Tab::Overview => render_scrolled(
+            frame,
+            content,
+            overview(sandbox, app.policy),
+            app.detail_scroll,
+        ),
+        Tab::Logs => render_logs(frame, app, content),
+        Tab::Network => render_network(frame, app, content),
+        Tab::Rules => render_rules(frame, app, content),
+    }
+}
+
+fn tab_line(active: Tab, full: bool) -> Line<'static> {
+    let tabs = [
+        ("Overview", Tab::Overview),
+        ("Logs", Tab::Logs),
+        ("Network", Tab::Network),
+        ("Rules", Tab::Rules),
+    ];
+    let mut spans = Vec::new();
+    for (label, tab) in tabs {
+        if full && matches!(tab, Tab::Overview | Tab::Logs) {
+            continue;
+        }
+        if tab == active {
+            spans.push(format!("[{label}]").fg(ACCENT).bold());
+        } else {
+            spans.push(format!(" {label} ").dim());
+        }
+        spans.push(" ".into());
+    }
+    spans.push(" [/] tabs".dim());
+    Line::from(spans)
+}
+
+fn render_scrolled(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>, scroll: usize) {
+    let lines = wrap_lines(lines, area.width);
+    let last = lines.len().saturating_sub(usize::from(area.height));
+    let offset = u16::try_from(scroll.min(last)).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).scroll((offset, 0)), area);
+}
+
+/// Wrap before scrolling so the cursor measures displayed rows, including long paths/hosts.
+fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut output = Vec::new();
+    for line in lines {
+        let mut current = Line::default().style(line.style);
+        let mut used = 0;
+        for span in line.spans {
+            let mut chunk = String::new();
+            for character in span.content.chars() {
+                let size = Line::from(character.to_string()).width();
+                if used + size > usize::from(width) {
+                    current
+                        .spans
+                        .push(Span::styled(std::mem::take(&mut chunk), span.style));
+                    output.push(current);
+                    current = Line::default().style(line.style);
+                    used = 0;
+                }
+                chunk.push(character);
+                used += size;
+            }
+            current.spans.push(Span::styled(chunk, span.style));
+        }
+        output.push(current);
+    }
+    output
+}
+
+fn render_logs(frame: &mut Frame, app: &App, area: Rect) {
+    if app.logs.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No logs yet.\nRun the agent from its card to produce output.")
+                .dim()
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    } else {
+        render_scrolled(
+            frame,
+            area,
+            app.logs.iter().cloned().map(Line::from).collect(),
+            app.detail_scroll,
+        );
+    }
+}
+
+fn render_full_network(frame: &mut Frame, app: &App, area: Rect) {
+    let block = pane("Network · Esc back", true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [tabs, filters, search, content] = pane_regions(inner);
+    frame.render_widget(tab_line(app.tab, true), tabs);
+    let scope = app.sandbox_filter.as_deref().unwrap_or("All sandboxes");
+    frame.render_widget(
+        Line::from(if app.tab == Tab::Rules {
+            format!("s {scope}")
+        } else {
+            format!("s {scope}   o {}", app.status_filter.label())
+        }),
+        filters,
+    );
+    if app.searching {
+        render_input(frame, search, &app.network_search, "/ ", true);
+    } else {
+        let query = app.network_search.text();
+        frame.render_widget(
+            Paragraph::new(if query.is_empty() {
+                "/ search".to_owned()
+            } else {
+                format!("/ {query} · Esc clears")
+            })
+            .dim(),
+            search,
+        );
+    }
+    if app.tab == Tab::Rules {
+        render_rules(frame, app, content);
+    } else {
+        render_network(frame, app, content);
+    }
+}
+
+fn render_network(frame: &mut Frame, app: &App, area: Rect) {
+    if !app.full_network
+        && let Some(sandbox) = app.selected_sandbox()
+        && !sandbox.proxied
+    {
+        let message = if sandbox.agent.is_some() {
+            "Created before network policy. Recreate this sandbox to route traffic through the msbx proxy."
+        } else {
+            "This sandbox was not created by msbx. Its traffic is not visible to the msbx proxy."
+        };
+        frame.render_widget(
+            Paragraph::new(message).dim().wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let rows = app.network_rows();
+    if rows.is_empty() {
+        let message = if app.network_search.text().is_empty()
+            && app.sandbox_filter.is_none()
+            && app.status_filter.label().eq_ignore_ascii_case("all")
+        {
+            "No connections yet.\nRun an agent and make a network request to see traffic here."
+        } else {
+            "No matching connections.\nEsc clears search; o and s change filters."
+        };
+        frame.render_widget(
+            Paragraph::new(message).dim().wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if let Some(entry) = app
+        .selected_network()
+        .filter(|entry| app.is_expanded(entry))
+    {
+        render_expanded_network(frame, app, area, &rows, entry);
+    } else {
+        let [summary, table] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let blocked = rows.iter().filter(|entry| !entry.allowed).count();
+        frame.render_widget(
+            Line::from(format!(
+                "{} endpoints · {} allowed · {blocked} blocked",
+                rows.len(),
+                rows.len() - blocked
+            ))
+            .dim(),
+            summary,
+        );
+        render_network_table(frame, app, table, &rows);
+    }
+}
+
+fn render_network_table(frame: &mut Frame, app: &App, area: Rect, entries: &[&NetEntry]) {
+    let full = app.full_network;
+    let sandbox_width = if area.width >= 75 { 16 } else { 10 };
+    let fixed_width = 31 + if full { sandbox_width + 1 } else { 0 };
+    let host_width = area.width.saturating_sub(fixed_width);
+    let mut widths = vec![
+        Constraint::Length(8),
+        Constraint::Min(10),
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Length(7),
+    ];
+    let mut labels = vec!["Time", "Host", "Port", "Hits", "Status"];
+    if full {
+        widths.insert(2, Constraint::Length(sandbox_width));
+        labels.insert(2, "Sandbox");
+    }
+    let rows = entries.iter().map(|entry| {
+        let seen = entry
+            .last_seen
+            .rsplit(' ')
+            .next()
+            .unwrap_or(&entry.last_seen);
+        let mut cells = vec![
+            Cell::from(seen),
+            Cell::from(truncate_text(&entry.host, host_width)),
+            Cell::from(entry.port.to_string()),
+            Cell::from(truncate_text(&entry.count.to_string(), 5)),
+            Cell::from(verdict(entry.allowed)).style(verdict_style(entry.allowed)),
+        ];
+        if full {
+            cells.insert(2, Cell::from(truncate_text(&entry.sandbox, sandbox_width)));
+        }
+        Row::new(cells)
+    });
+    let table = Table::new(rows, widths)
+        .header(Row::new(labels).bold())
+        .column_spacing(1)
+        .row_highlight_style(Style::new().add_modifier(Modifier::BOLD))
+        .highlight_symbol("▸ ");
+    let visible = usize::from(area.height.saturating_sub(1)).max(1);
+    let selected = app.network_row.min(entries.len().saturating_sub(1));
+    let mut state = TableState::default()
+        .with_selected(Some(selected))
+        .with_offset(selected.saturating_sub(visible - 1));
+    frame.render_stateful_widget(table, area, &mut state);
+}
+
+fn verdict(allowed: bool) -> &'static str {
+    if allowed { "Allowed" } else { "Blocked" }
+}
+fn verdict_style(allowed: bool) -> Style {
+    Style::new().fg(if allowed { Color::Green } else { Color::Red })
+}
+
+fn connection_details(entry: &NetEntry, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("{} · port {}", verdict(entry.allowed), entry.port))
+            .style(verdict_style(entry.allowed))
+            .bold(),
+    ];
+    for (label, value) in [
+        ("Host", entry.host.clone()),
+        ("Sandbox", entry.sandbox.clone()),
+        ("First seen", entry.first_seen.clone()),
+        ("Last seen", entry.last_seen.clone()),
+        ("Hits", entry.count.to_string()),
+        ("Allowed hits", entry.allowed_count.to_string()),
+        ("Blocked hits", entry.blocked_count.to_string()),
+    ] {
+        lines.extend(wrapped_field(label, &value, width));
+    }
+    lines
+}
+
+fn render_expanded_network(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    entries: &[&NetEntry],
+    entry: &NetEntry,
+) {
+    let lines = connection_details(entry, area.width);
+    let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    if height.saturating_add(3) <= area.height {
+        let [table, _, details] = Layout::vertical([
+            Constraint::Min(2),
+            Constraint::Length(1),
+            Constraint::Length(height),
+        ])
+        .areas(area);
+        render_network_table(frame, app, table, entries);
+        render_scrolled(frame, details, lines, app.detail_scroll);
+    } else if height > area.height {
+        let [details, hint] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        render_scrolled(frame, details, lines, app.detail_scroll);
+        let keys = keymap::hints(app)
+            .iter()
+            .filter(|(key, _)| key.starts_with("Pg") || *key == "Enter")
+            .map(|(key, label)| format!("{key} {label}"))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        frame.render_widget(Paragraph::new(keys).dim(), hint);
+    } else {
+        render_scrolled(frame, area, lines, app.detail_scroll);
+    }
+}
+
+fn wrapped_field(label: &str, value: &str, width: u16) -> Vec<Line<'static>> {
+    let prefix = format!("{label}: ");
+    let indent = Line::from(prefix.as_str())
+        .width()
+        .min(usize::from(width.saturating_sub(1)));
+    let room = usize::from(width).saturating_sub(indent).max(1);
+    let mut lines = Vec::new();
+    let mut chunk = String::new();
+    for character in value.chars() {
+        if !chunk.is_empty() && Line::from(format!("{chunk}{character}")).width() > room {
+            let start = if lines.is_empty() {
+                prefix.clone()
+            } else {
+                " ".repeat(indent)
+            };
+            lines.push(Line::from(format!("{start}{chunk}")));
+            chunk.clear();
+        }
+        chunk.push(character);
+    }
+    let start = if lines.is_empty() {
+        prefix
+    } else {
+        " ".repeat(indent)
+    };
+    lines.push(Line::from(format!("{start}{chunk}")));
+    lines
+}
+
+fn render_rules(frame: &mut Frame, app: &App, area: Rect) {
+    let rules = app.rule_rows();
+    if rules.is_empty() {
+        frame.render_widget(Paragraph::new("No rules here.\nPress a to add a rule, p to choose a preset.\nIn a filtered view, Esc clears search.").dim().wrap(Wrap { trim: false }), area);
+        return;
+    }
+    let [table_area, hint] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(area);
+    let rows = rules.iter().map(|rule| {
+        Row::new([
+            Cell::from(rule.source.name()),
+            Cell::from(truncate_text(rule.sandbox.as_deref().unwrap_or("all"), 11)),
+            Cell::from(truncate_text(
+                &rule.target,
+                table_area.width.saturating_sub(30),
+            )),
+            Cell::from(verdict(rule.allowed)).style(verdict_style(rule.allowed)),
+        ])
+    });
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(7),
+            Constraint::Length(11),
+            Constraint::Min(10),
+            Constraint::Length(7),
+        ],
+    )
+    .header(Row::new(["Source", "Scope", "Target", "Status"]).bold())
+    .column_spacing(1)
+    .row_highlight_style(Style::new().add_modifier(Modifier::BOLD))
+    .highlight_symbol("▸ ");
+    let visible = usize::from(table_area.height.saturating_sub(1)).max(1);
+    let selected = app.rule_row.min(rules.len().saturating_sub(1));
+    let mut state = TableState::default()
+        .with_selected(Some(selected))
+        .with_offset(selected.saturating_sub(visible - 1));
+    frame.render_stateful_widget(table, table_area, &mut state);
+    let note = rules.get(selected).map_or("", |rule| {
+        if rule.source == Source::Preset {
+            "Preset rule · read-only · p changes preset"
+        } else {
+            "a add rule · r remove selected rule"
+        }
+    });
+    frame.render_widget(Paragraph::new(note).dim().wrap(Wrap { trim: false }), hint);
+}
+
+fn render_overlay(frame: &mut Frame, app: &App) {
+    match &app.popup {
+        Some(Popup::Create(wizard)) => render_create(frame, app, wizard),
+        Some(Popup::ConfirmRemove { name }) => {
+            render_confirmation(
+                frame,
+                app,
+                "Remove sandbox",
+                &format!("Remove sandbox {name}?"),
+            );
+        }
+        Some(Popup::Help) => render_help(frame, app),
+        Some(Popup::Preset { index, then_create }) => {
+            render_preset(frame, app, *index, *then_create);
+        }
+        Some(Popup::AddRule {
+            target,
+            allowed,
+            sandbox,
+            error,
+        }) => render_rule_input(
+            frame,
+            app,
+            target,
+            *allowed,
+            sandbox.as_deref(),
+            error.as_deref(),
+        ),
+        Some(Popup::ConfirmRuleRemove { rule }) => render_rule_confirmation(frame, app, rule),
+        None => {}
+    }
+}
+
+fn popup_bounds(area: Rect, width: u16, height: u16) -> Rect {
+    area.centered(Constraint::Max(width), Constraint::Max(height))
+}
+
+fn popup_area(frame: &mut Frame, title: &str, width: u16, height: u16) -> Rect {
+    let area = popup_bounds(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT))
+        .title(format!(" {title} ").bold())
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
+fn render_create(frame: &mut Frame, app: &App, wizard: &CreateWizard) {
+    match wizard.stage {
+        CreateStage::Agent => render_agents(frame, app, wizard.agent_index),
+        CreateStage::Configure => render_configuration(frame, app, wizard),
+        CreateStage::Folder => render_folders(frame, app, wizard),
+    }
+}
+
+fn render_agents(frame: &mut Frame, app: &App, selected: usize) {
+    let inner = popup_area(frame, "New sandbox · 1/2 Choose agent", 78, 17);
+    let [intro, choices, hint] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new("Choose an agent. Credentials are checked on the host.")
+            .wrap(Wrap { trim: false })
+            .dim(),
+        intro,
+    );
+    let mut lines = Vec::new();
+    let mut selected_end = 0;
+    for (index, id) in app.agents.iter().enumerate() {
+        let description = crate::agents::find(id).map_or("", |agent| agent.description);
+        let marker = if index == selected { "▸" } else { " " };
+        let mut title = Line::from(truncate_text(
+            &format!("{marker} {id} · {description}"),
+            choices.width,
+        ));
+        if index == selected {
+            title = title.fg(ACCENT).bold();
+        }
+        lines.push(title);
+        let credential = app
+            .credentials
+            .get(index)
+            .map_or("checking credentials…", String::as_str);
+        lines.extend(credential_lines(credential, choices.width, 2));
+        if index == selected {
+            selected_end = lines.len();
+        }
+        lines.push(Line::default());
+    }
+    let visible = usize::from(choices.height);
+    let start = selected_end.saturating_sub(visible);
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(start)
+                .take(visible)
+                .collect::<Vec<_>>(),
+        ),
+        choices,
+    );
+    render_footer(frame, app, hint);
+}
+
+fn credential_lines(credential: &str, width: u16, maximum: usize) -> Vec<Line<'static>> {
+    let source = credential
+        .split("; ")
+        .map(|part| Line::from(part.to_owned()).dim())
+        .collect();
+    let mut lines = wrap_lines(source, width);
+    if lines.len() > maximum {
+        lines.truncate(maximum);
+        if let Some(last) = lines.last_mut() {
+            *last = Line::from(truncate_text(&format!("{last}…"), width)).dim();
+        }
+    }
+    lines
+}
+
+fn truncate_text(text: &str, width: u16) -> String {
+    if Line::from(text).width() <= usize::from(width) {
+        return text.to_owned();
+    }
+    let mut output = String::new();
+    let room = usize::from(width.saturating_sub(1));
+    for character in text.chars() {
+        if Line::from(format!("{output}{character}")).width() > room {
+            break;
+        }
+        output.push(character);
+    }
+    if width > 0 {
+        output.push('…');
+    }
+    output
+}
+
+fn render_configuration(frame: &mut Frame, app: &App, wizard: &CreateWizard) {
+    let agent = app
+        .agents
+        .get(wizard.agent_index)
+        .copied()
+        .unwrap_or("agent");
+    let inner = popup_area(frame, &format!("Configure {agent} · 2/2"), 78, 18);
+    let credential = app
+        .credentials
+        .get(wizard.agent_index)
+        .map_or("checking credentials…", String::as_str);
+    let credential_lines = credential_lines(credential, inner.width, 4);
+    let credential_height = u16::try_from(credential_lines.len())
+        .unwrap_or(4)
+        .clamp(2, 4);
+    let [
+        credentials,
+        name_label,
+        name,
+        _,
+        workspace,
+        project,
+        warning,
+        error,
+        buttons,
+        hint,
+    ] = Layout::vertical([
+        Constraint::Length(credential_height),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(credential_lines), credentials);
+    frame.render_widget(
+        Line::from(field_label("Name", wizard.field == CreateField::Name)),
+        name_label,
+    );
+    render_input(
+        frame,
+        name,
+        &wizard.name,
+        "",
+        wizard.field == CreateField::Name,
+    );
+    frame.render_widget(
+        Line::from(field_label(
+            "Workspace · Enter chooses folder",
+            wizard.field == CreateField::Workspace,
+        )),
+        workspace,
+    );
+    frame.render_widget(
+        Paragraph::new(shorten_home(&wizard.project, app.home.as_deref()))
+            .wrap(Wrap { trim: false }),
+        project,
+    );
+    frame.render_widget(
+        Paragraph::new("The agent can edit files in this folder.").dim(),
+        warning,
+    );
+    if let Some(message) = &wizard.error {
+        frame.render_widget(
+            Paragraph::new(message.as_str())
+                .red()
+                .wrap(Wrap { trim: false }),
+            error,
+        );
+    }
+    let back = if wizard.field == CreateField::Back {
+        "[Back]"
+    } else {
+        " Back "
+    };
+    let create = if wizard.field == CreateField::Create {
+        "[Create]"
+    } else {
+        " Create "
+    };
+    frame.render_widget(Line::from(format!("{back}    {create}")).bold(), buttons);
+    render_footer(frame, app, hint);
+}
+
+fn field_label(label: &str, focused: bool) -> Span<'static> {
+    let marker = if focused { "▸" } else { " " };
+    let text = format!("{marker} {label}");
+    if focused {
+        text.fg(ACCENT).bold()
+    } else {
+        text.into()
+    }
+}
+
+fn render_input(frame: &mut Frame, area: Rect, input: &TextInput, prefix: &str, focused: bool) {
+    let prefix_width = u16::try_from(Line::from(prefix).width()).unwrap_or(u16::MAX);
+    let width = area.width.saturating_sub(prefix_width);
+    let (text, cursor) = input.visible(width);
+    frame.render_widget(Paragraph::new(format!("{prefix}{text}")).underlined(), area);
+    if focused && width > 0 && area.height > 0 {
+        frame.set_cursor_position((
+            area.x
+                .saturating_add(prefix_width)
+                .saturating_add(cursor.min(width - 1)),
+            area.y,
+        ));
+    }
+}
+
+fn render_folders(frame: &mut Frame, app: &App, wizard: &CreateWizard) {
+    let inner = popup_area(frame, "Workspace folder", 78, 19);
+    let [path, filter, list, status, hint] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(wizard.folder.path.display().to_string())
+            .wrap(Wrap { trim: false })
+            .bold(),
+        path,
+    );
+    render_input(
+        frame,
+        filter,
+        &wizard.folder.filter,
+        "Filter folders > ",
+        true,
+    );
+    let directories = wizard.folder.visible();
+    let mut choices = vec!["Create here · use this folder".to_owned(), "..".to_owned()];
+    choices.extend(directories.iter().map(|path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    }));
+    let visible = usize::from(list.height).max(1);
+    let start = wizard.folder.row.saturating_sub(visible - 1);
+    let lines = choices
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, label)| Line::from(field_label(label, index == wizard.folder.row)))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), list);
+    let message = if let Some(error) = &wizard.folder.error {
+        error.as_str()
+    } else if wizard.folder.loading {
+        "Loading folders…"
+    } else if directories.is_empty() && !wizard.folder.filter.text().is_empty() {
+        "No matching folders. Ctrl-U clears the filter."
+    } else if directories.is_empty() {
+        "No child folders. Choose Create here or .."
+    } else {
+        "Type to filter · only folders are shown"
+    };
+    frame.render_widget(
+        Paragraph::new(message).dim().wrap(Wrap { trim: false }),
+        status,
+    );
+    render_footer(frame, app, hint);
+}
+
+fn render_confirmation(frame: &mut Frame, app: &App, title: &str, message: &str) {
+    let width = frame.area().width.min(78);
+    let lines = wrap_lines(
+        message
+            .lines()
+            .map(|line| Line::from(line.to_owned()))
+            .collect(),
+        width.saturating_sub(4),
+    );
+    let height = u16::try_from(lines.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(4)
+        .max(8);
+    let inner = popup_area(
+        frame,
+        title,
+        width,
+        height.min(frame.area().height.saturating_sub(2)),
+    );
+    let [body, _, actions] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(lines), body);
+    render_footer(frame, app, actions);
+}
+
+fn render_rule_confirmation(frame: &mut Frame, app: &App, rule: &RuleInfo) {
+    render_confirmation(
+        frame,
+        app,
+        "Remove network rule",
+        &format!(
+            "Remove {} rule {}?\nScope: {} ({})\nFuture connections use the remaining rules.",
+            verdict(rule.allowed),
+            rule.target,
+            rule.sandbox.as_deref().unwrap_or("all sandboxes"),
+            rule.source.name()
+        ),
+    );
+}
+
+fn render_rule_input(
+    frame: &mut Frame,
+    app: &App,
+    target: &TextInput,
+    allowed: bool,
+    sandbox: Option<&str>,
+    error: Option<&str>,
+) {
+    let inner = popup_area(frame, "Add network rule", 72, 13);
+    let [scope, kind, label, input, explanation, error_area, hint] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Scope: {}",
+            sandbox.unwrap_or("all sandboxes (global)")
+        ))
+        .wrap(Wrap { trim: false }),
+        scope,
+    );
+    frame.render_widget(
+        Line::from(format!(
+            "Action: {} · Tab changes",
+            if allowed { "Allow" } else { "Block" }
+        ))
+        .style(verdict_style(allowed)),
+        kind,
+    );
+    frame.render_widget(
+        Paragraph::new("Host, wildcard, IP or CIDR; optional :port").dim(),
+        label,
+    );
+    render_input(frame, input, target, "> ", true);
+    frame.render_widget(Paragraph::new("Examples: api.example.com:443 or *.example.com\nDeny rules still take precedence over allows.").dim().wrap(Wrap { trim: false }), explanation);
+    if let Some(message) = error {
+        frame.render_widget(
+            Paragraph::new(message).red().wrap(Wrap { trim: false }),
+            error_area,
+        );
+    }
+    render_footer(frame, app, hint);
+}
+
+fn help_regions(inner: Rect) -> [Rect; 2] {
+    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner)
+}
+
+fn render_help(frame: &mut Frame, app: &App) {
+    let hints = keymap::help(app);
+    let inner = popup_area(
+        frame,
+        "Keys · current view",
+        78,
+        frame.area().height.saturating_sub(2),
+    );
+    let [rows, footer] = help_regions(inner);
+    let visible = usize::from(rows.height).max(1);
+    let start = app.help_scroll.min(hints.len().saturating_sub(visible));
+    let lines = hints
+        .iter()
+        .skip(start)
+        .take(visible)
+        .map(|(key, label)| Line::from(vec![format!("{key:<17}").bold(), (*label).into()]))
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), rows);
+    let end = (start + visible).min(hints.len());
+    let keys = keymap::hints(app)
+        .iter()
+        .map(|(key, label)| Line::from(format!("{key} {label}  ")))
+        .collect();
+    frame.render_widget(
+        spread(
+            keys,
+            Line::from(format!("{}–{end}/{}", start + 1, hints.len())),
+            footer.width,
+        ),
+        footer,
+    );
+}
+
+fn render_preset(frame: &mut Frame, app: &App, selected: usize, then_create: bool) {
+    let inner = popup_area(frame, "Network policy", 78, 14);
+    let [intro, choices, hint] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let text = if then_create {
+        "Choose once for all sandboxes; p changes it later."
+    } else {
+        "Preset rules apply to all sandboxes."
+    };
+    frame.render_widget(Paragraph::new(text).dim().wrap(Wrap { trim: false }), intro);
+    let lines = Preset::ALL
+        .iter()
+        .enumerate()
+        .flat_map(|(index, preset)| {
+            [
+                Line::from(field_label(preset.title(), index == selected)),
+                Line::from(format!("  {}", preset.describe())).dim(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), choices);
+    render_footer(frame, app, hint);
 }
 
 fn card_metrics(sandbox: &SandboxInfo) -> Line<'static> {
@@ -225,12 +1194,6 @@ fn action_row(status: Status) -> Line<'static> {
     ])
 }
 
-fn render_new_card(frame: &mut Frame, selected: bool, area: Rect) {
-    let block = card_block(selected).border_type(BorderType::LightDoubleDashed);
-    let text = Line::from(vec!["+ new sandbox  ".into(), "(c)".dim()]).centered();
-    frame.render_widget(Paragraph::new(text).block(block), area);
-}
-
 fn status_symbol(status: Status) -> (&'static str, Color) {
     match status {
         Status::Running => ("●", Color::Green),
@@ -249,58 +1212,6 @@ fn status_word(status: Status) -> &'static str {
         Status::Crashed => "crashed",
         Status::Other => "unknown",
     }
-}
-
-fn render_detail(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(sandbox) = app.selected_sandbox() else {
-        let lines = if app.sandboxes.is_empty() {
-            vec![Line::from("No sandboxes yet — press c to create one".dim())]
-        } else {
-            vec![
-                Line::from("New sandbox".bold()),
-                Line::default(),
-                Line::from("Press ↵ or c to create a sandbox for".dim()),
-                Line::from(shorten_home(&app.project, app.home.as_deref())),
-            ]
-        };
-        frame.render_widget(Paragraph::new(lines), area);
-        return;
-    };
-    let [title, tabs, rule, content] = area.layout(&Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ]));
-    frame.render_widget(Line::from(sandbox.name.clone().bold()), title);
-    frame.render_widget(tab_line(app.tab), tabs);
-    frame.render_widget(
-        Line::from("─".repeat(usize::from(rule.width)).dark_gray()),
-        rule,
-    );
-    let lines = match app.tab {
-        Tab::Overview => overview(sandbox, app.policy),
-        Tab::Logs => log_tail(&app.logs, content.height),
-        Tab::Network => network_tab(app, sandbox, content.height),
-    };
-    frame.render_widget(Paragraph::new(lines), content);
-}
-
-fn tab_line(active: Tab) -> Line<'static> {
-    let tab = |label: &'static str, tab: Tab| {
-        if tab == active {
-            label.fg(ACCENT).bold().underlined()
-        } else {
-            label.dim()
-        }
-    };
-    Line::from(vec![
-        tab("Overview", Tab::Overview),
-        "   ".into(),
-        tab("Logs", Tab::Logs),
-        "   ".into(),
-        tab("Network", Tab::Network),
-    ])
 }
 
 fn overview(sandbox: &SandboxInfo, policy: Option<Preset>) -> Vec<Line<'static>> {
@@ -327,6 +1238,15 @@ fn overview(sandbox: &SandboxInfo, policy: Option<Preset>) -> Vec<Line<'static>>
         or_dash(sandbox.network.clone())
     };
     let mut lines = vec![
+        row("name", sandbox.name.clone()),
+        row("agent", or_dash(sandbox.agent.clone())),
+        row(
+            "workspace",
+            sandbox
+                .project
+                .as_ref()
+                .map_or_else(|| "—".into(), |path| path.display().to_string()),
+        ),
         row("status", status),
         row("cpu", cpu),
         row("memory", memory(sandbox, " / ")),
@@ -364,69 +1284,6 @@ fn traffic(sandbox: &SandboxInfo) -> Option<String> {
     }
 }
 
-fn network_tab(app: &App, sandbox: &SandboxInfo, height: u16) -> Vec<Line<'static>> {
-    let rows = app.network_rows();
-    let blocked = rows.iter().filter(|entry| !entry.allowed).count();
-    let mut header = vec![format!("policy {}", preset_word(app.policy)).into()];
-    if let Some(traffic) = traffic(sandbox) {
-        header.push(" · ".dim());
-        header.push(traffic.into());
-    }
-    header.push(" · ".dim());
-    header.push(format!("{blocked} blocked").into());
-    if !sandbox.proxied {
-        // The proxy never sees this sandbox's traffic, so neither the policy nor the counts
-        // above apply to it.
-        let (why, fix) = match sandbox.agent {
-            Some(_) => (
-                "created before network policy; recreate with",
-                Some(format!("msb rm -f {}", sandbox.name)),
-            ),
-            None => (
-                "not created by msbx, so the msbx proxy",
-                Some("does not see its traffic".to_owned()),
-            ),
-        };
-        let mut lines = vec![Line::from(why.dim())];
-        lines.extend(fix.map(Line::from));
-        return lines;
-    }
-    let mut lines = vec![Line::from(header), Line::default()];
-    if rows.is_empty() {
-        lines.push(Line::from("No connections yet".dim()));
-        return lines;
-    }
-    let visible = usize::from(height).saturating_sub(lines.len()).max(1);
-    let start = app.network_row.saturating_sub(visible - 1);
-    for (index, entry) in rows.iter().enumerate().skip(start).take(visible) {
-        lines.push(network_row(entry, index == app.network_row));
-    }
-    lines
-}
-
-fn network_row(entry: &NetEntry, selected: bool) -> Line<'static> {
-    let (symbol, colour) = if entry.allowed {
-        ("✓", Color::Green)
-    } else {
-        ("✗", Color::Red)
-    };
-    let cursor = if selected { "▸ " } else { "  " };
-    let target = format!("{}:{}", entry.host, entry.port);
-    let mut line = Line::from(vec![
-        cursor.fg(ACCENT),
-        symbol.fg(colour),
-        " ".into(),
-        format!("{target:<32}").into(),
-        format!("{:>6}", entry.count).into(),
-        "  ".into(),
-        entry.last_seen.clone().dim(),
-    ]);
-    if selected {
-        line = line.bold();
-    }
-    line
-}
-
 fn row(label: &str, value: String) -> Line<'static> {
     Line::from(vec![
         format!("{label:LABEL_WIDTH$}").dim(),
@@ -445,120 +1302,6 @@ fn memory(sandbox: &SandboxInfo, separator: &str) -> String {
         (None, None) => "—".to_owned(),
         (used, limit) => format!("{}{separator}{}", or_dash(used), or_dash(limit)),
     }
-}
-
-fn log_tail(logs: &[String], height: u16) -> Vec<Line<'static>> {
-    if logs.is_empty() {
-        return vec![Line::from("No logs yet".dim())];
-    }
-    let start = logs.len().saturating_sub(usize::from(height));
-    logs[start..]
-        .iter()
-        .map(|line| Line::from(line.clone()))
-        .collect()
-}
-
-fn popup_block(title: &str) -> Block<'_> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT))
-        .title(format!(" {title} ").bold())
-        .padding(Padding::new(2, 2, 1, 0))
-}
-
-fn render_popup(frame: &mut Frame, title: &str, lines: Vec<Line<'_>>, width: u16) {
-    let height = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .saturating_add(3);
-    let area = frame
-        .area()
-        .centered(Constraint::Length(width), Constraint::Length(height));
-    frame.render_widget(Clear, area);
-    frame.render_widget(Paragraph::new(lines).block(popup_block(title)), area);
-}
-
-fn render_create(frame: &mut Frame, app: &App, agent_index: usize) {
-    let mut choices = vec![format!("{:LABEL_WIDTH$}", "agent").dim()];
-    for (index, agent) in app.agents.iter().enumerate() {
-        let choice = format!(" {agent} ");
-        choices.push(if index == agent_index {
-            choice.fg(Color::Black).bg(ACCENT).bold()
-        } else {
-            choice.dim()
-        });
-        choices.push(" ".into());
-    }
-    let agent = app.agents.get(agent_index).copied().unwrap_or_default();
-    let lines = vec![
-        Line::from(choices),
-        Line::default(),
-        row("project", shorten_home(&app.project, app.home.as_deref())),
-        row("name", (app.sandbox_name)(agent, &app.project)),
-        Line::default(),
-        Line::from(vec![
-            "←→".bold(),
-            " agent  ".dim(),
-            "↵".bold(),
-            " create  ".dim(),
-            "esc".bold(),
-            " cancel".dim(),
-        ]),
-    ];
-    render_popup(frame, "New sandbox", lines, 56);
-}
-
-fn render_confirm_remove(frame: &mut Frame, name: &str) {
-    let lines = vec![
-        Line::from(vec!["Remove ".into(), name.bold(), "?".into()]),
-        Line::default(),
-        Line::from(vec![
-            "y".bold(),
-            " remove  ".dim(),
-            "n".bold(),
-            " cancel".dim(),
-        ]),
-    ];
-    render_popup(frame, "Remove sandbox", lines, 48);
-}
-
-fn render_preset(frame: &mut Frame, index: usize, then_create: bool) {
-    let mut lines = Vec::new();
-    if then_create {
-        lines.push(Line::from(
-            "Choose once for all sandboxes; change it later with p.".dim(),
-        ));
-        lines.push(Line::default());
-    }
-    for (position, preset) in Preset::ALL.iter().enumerate() {
-        let title = format!(" {:<12}", preset.title());
-        let title = if position == index {
-            title.fg(Color::Black).bg(ACCENT).bold()
-        } else {
-            title.into()
-        };
-        lines.push(Line::from(vec![title, " ".into(), preset.describe().dim()]));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        "↑↓".bold(),
-        " choose  ".dim(),
-        "↵".bold(),
-        " select  ".dim(),
-        "esc".bold(),
-        " cancel".dim(),
-    ]));
-    render_popup(frame, "Network policy", lines, 76);
-}
-
-fn render_help(frame: &mut Frame) {
-    let hint = |(key, label): &(&'static str, &'static str)| {
-        Line::from(vec![format!("{key:8}").bold(), label.dim()])
-    };
-    let mut lines: Vec<Line<'static>> = KEYS.iter().map(hint).collect();
-    lines.push(Line::default());
-    lines.push(Line::from("Network tab".bold()));
-    lines.extend(NETWORK_KEYS.iter().map(hint));
-    render_popup(frame, "Keys", lines, 34);
 }
 
 fn bar(percent: f64, width: u16) -> String {
@@ -615,6 +1358,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::app::{CreateField, CreateStage, Focus};
+    use crate::input::TextInput;
+    use crate::model::RuleInfo;
+    use crate::policy::Source;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -720,7 +1467,10 @@ mod tests {
             port,
             allowed,
             count,
-            last_seen: seen.to_owned(),
+            last_seen: format!("2026-10-29 {seen}"),
+            first_seen: "2026-10-29 11:45:00".into(),
+            allowed_count: if allowed { count } else { 0 },
+            blocked_count: if allowed { 0 } else { count },
         }
     }
 
@@ -758,6 +1508,11 @@ mod tests {
             network: Some("public + host".to_owned()),
             ..info("scratch", Status::Running)
         };
+        app.credentials = vec![
+            "OPENAI_API_KEY: shell/Keychain available; shared login: missing".into(),
+            "shared login: present".into(),
+            "none required".into(),
+        ];
         app.set_sandboxes(vec![running, stopped, older]);
         app.set_network(
             Some(Preset::Balanced),
@@ -772,165 +1527,656 @@ mod tests {
         app
     }
 
-    fn draw(app: &App, width: u16, height: u16) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, app)).unwrap();
-        terminal
+    fn draw(app: &App, width: u16, height: u16) -> anyhow::Result<Terminal<TestBackend>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| render(frame, app))?;
+        Ok(terminal)
+    }
+
+    fn press(app: &mut App, code: crossterm::event::KeyCode) {
+        let _ = app.update(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    }
+
+    fn snapshots(name: &str, app: &App) -> anyhow::Result<()> {
+        let mut screens = Vec::new();
+        for (width, height) in [(100, 30), (80, 24), (60, 20)] {
+            screens.push(format!(
+                "{width}x{height}\n{}",
+                draw(app, width, height)?.backend()
+            ));
+        }
+        insta::assert_snapshot!(name, screens.join("\n"));
+        Ok(())
+    }
+
+    fn detail(tab: Tab) -> App {
+        let mut app = populated();
+        app.focus = Focus::Detail;
+        app.tab = tab;
+        app
+    }
+
+    fn full_network() -> App {
+        let mut app = detail(Tab::Network);
+        press(&mut app, crossterm::event::KeyCode::Char('n'));
+        app
+    }
+
+    fn with_wizard(stage: CreateStage) -> App {
+        let mut app = populated();
+        press(&mut app, crossterm::event::KeyCode::Char('c'));
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.stage = stage;
+            wizard.name.set_text("codex-api");
+            wizard.folder.loading = false;
+        }
+        app
+    }
+
+    fn rules() -> App {
+        let mut app = detail(Tab::Rules);
+        app.set_rules(vec![
+            RuleInfo {
+                target: "api.openai.com".into(),
+                source: Source::Preset,
+                sandbox: None,
+                allowed: true,
+            },
+            RuleInfo {
+                target: "*.github.com:443".into(),
+                source: Source::Global,
+                sandbox: None,
+                allowed: true,
+            },
+            RuleInfo {
+                target: "telemetry.example.com".into(),
+                source: Source::Sandbox,
+                sandbox: Some("codex-api".into()),
+                allowed: false,
+            },
+        ]);
+        app
     }
 
     #[test]
-    fn snapshot_populated() {
+    fn snapshot_dashboard_cards() -> anyhow::Result<()> {
         let mut app = populated();
-        app.status_line = Some("started pi-notes".to_owned());
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        app.status_line = Some("created pi-notes; Enter attaches".into());
+        snapshots("dashboard_cards", &app)
     }
 
     #[test]
-    fn snapshot_stopped_and_foreign_overview() {
-        let mut app = populated();
+    fn snapshot_dashboard_overview() -> anyhow::Result<()> {
+        snapshots("dashboard_overview", &detail(Tab::Overview))
+    }
+
+    #[test]
+    fn snapshot_overview_stopped() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Overview);
+        app.selected = 1;
+        snapshots("overview_stopped", &app)
+    }
+
+    #[test]
+    fn snapshot_overview_foreign() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Overview);
         app.selected = 2;
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        snapshots("overview_foreign", &app)
     }
 
     #[test]
-    fn snapshot_new_card_selected() {
+    fn snapshot_network_older() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Network);
+        app.sandboxes[0].proxied = false;
+        snapshots("network_older", &app)
+    }
+
+    #[test]
+    fn snapshot_folders_empty() -> anyhow::Result<()> {
+        snapshots("folders_empty", &with_wizard(CreateStage::Folder))
+    }
+
+    #[test]
+    fn snapshot_rule_input_empty() -> anyhow::Result<()> {
+        let mut app = rules();
+        press(&mut app, crossterm::event::KeyCode::Char('a'));
+        snapshots("rule_input_empty", &app)
+    }
+
+    #[test]
+    fn snapshot_dashboard_empty() -> anyhow::Result<()> {
         let mut app = populated();
-        app.selected = 3;
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        app.set_sandboxes(Vec::new());
+        snapshots("dashboard_empty", &app)
     }
 
     #[test]
-    fn snapshot_empty() {
-        let app = App::new(
-            PathBuf::from("/home/dev/api"),
-            None,
-            vec!["codex"],
-            crate::tui::preview_name,
-        );
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
-    }
-
-    #[test]
-    fn snapshot_create_popup() {
+    fn snapshot_new_card_and_scroll() -> anyhow::Result<()> {
         let mut app = populated();
-        app.popup = Some(Popup::Create { agent_index: 1 });
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        app.selected = app.sandboxes.len();
+        snapshots("dashboard_new_card", &app)
     }
 
     #[test]
-    fn snapshot_confirm_remove_popup() {
+    fn snapshot_logs() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Logs);
+        app.logs = (1..=40).map(|index| format!("log line {index}")).collect();
+        app.detail_scroll = 20;
+        snapshots("logs_scrolled", &app)
+    }
+
+    #[test]
+    fn snapshot_logs_empty() -> anyhow::Result<()> {
+        snapshots("logs_empty", &detail(Tab::Logs))
+    }
+
+    #[test]
+    fn snapshot_network() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Network);
+        app.network_row = 2;
+        snapshots("network", &app)
+    }
+
+    #[test]
+    fn snapshot_network_empty() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Network);
+        app.set_network(Some(Preset::LockedDown), Vec::new());
+        snapshots("network_empty", &app)
+    }
+
+    #[test]
+    fn snapshot_network_foreign() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Network);
+        app.selected = 2;
+        snapshots("network_foreign", &app)
+    }
+
+    #[test]
+    fn snapshot_full_network() -> anyhow::Result<()> {
+        snapshots("full_network", &full_network())
+    }
+
+    #[test]
+    fn snapshot_full_network_expanded() -> anyhow::Result<()> {
+        let mut app = full_network();
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        snapshots("full_network_expanded", &app)
+    }
+
+    #[test]
+    fn snapshot_full_network_empty() -> anyhow::Result<()> {
+        let mut app = full_network();
+        app.set_network(Some(Preset::Balanced), Vec::new());
+        snapshots("full_network_empty", &app)
+    }
+
+    #[test]
+    fn snapshot_network_search() -> anyhow::Result<()> {
+        let mut app = full_network();
+        press(&mut app, crossterm::event::KeyCode::Char('/'));
+        app.network_search.set_text("pypi");
+        snapshots("network_search", &app)
+    }
+
+    #[test]
+    fn snapshot_network_no_matches() -> anyhow::Result<()> {
+        let mut app = full_network();
+        app.network_search.set_text("nothing-matches");
+        snapshots("network_no_matches", &app)
+    }
+
+    #[test]
+    fn snapshot_rules() -> anyhow::Result<()> {
+        snapshots("rules", &rules())
+    }
+
+    #[test]
+    fn snapshot_rules_empty() -> anyhow::Result<()> {
+        snapshots("rules_empty", &detail(Tab::Rules))
+    }
+
+    #[test]
+    fn snapshot_rule_input() -> anyhow::Result<()> {
+        let mut app = rules();
+        press(&mut app, crossterm::event::KeyCode::Char('a'));
+        if let Some(Popup::AddRule { target, .. }) = &mut app.popup {
+            target.set_text("*.example.com:443");
+        }
+        snapshots("rule_input", &app)
+    }
+
+    #[test]
+    fn snapshot_rule_error() -> anyhow::Result<()> {
+        let mut app = rules();
+        app.popup = Some(Popup::AddRule {
+            target: TextInput::new("bad host"),
+            allowed: false,
+            sandbox: Some("codex-api".into()),
+            error: Some("target cannot contain spaces".into()),
+        });
+        snapshots("rule_error", &app)
+    }
+
+    #[test]
+    fn snapshot_rule_remove() -> anyhow::Result<()> {
+        let mut app = rules();
+        app.rule_row = 2;
+        press(&mut app, crossterm::event::KeyCode::Char('r'));
+        snapshots("rule_remove", &app)
+    }
+
+    #[test]
+    fn snapshot_create_agents() -> anyhow::Result<()> {
+        snapshots("create_agents", &with_wizard(CreateStage::Agent))
+    }
+
+    #[test]
+    fn snapshot_create_configure() -> anyhow::Result<()> {
+        snapshots("create_configure", &with_wizard(CreateStage::Configure))
+    }
+
+    #[test]
+    fn snapshot_create_invalid() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Configure);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.name.set_text("bad name");
+            wizard.error = Some("use lowercase letters, digits and single interior hyphens".into());
+            wizard.field = CreateField::Create;
+        }
+        snapshots("create_invalid", &app)
+    }
+
+    #[test]
+    fn snapshot_folders() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Folder);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.folder.directories = ["api", "docs", "web"]
+                .map(|name| wizard.folder.path.join(name))
+                .to_vec();
+            wizard.folder.row = 3;
+        }
+        snapshots("folders", &app)
+    }
+
+    #[test]
+    fn snapshot_folders_no_matches() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Folder);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.folder.filter.set_text("nothing");
+        }
+        snapshots("folders_no_matches", &app)
+    }
+
+    #[test]
+    fn snapshot_folder_error() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Folder);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.folder.error = Some("reading /private/locked: permission denied".into());
+        }
+        snapshots("folder_error", &app)
+    }
+
+    #[test]
+    fn snapshot_confirm_remove() -> anyhow::Result<()> {
         let mut app = populated();
         app.popup = Some(Popup::ConfirmRemove {
-            name: "codex-api".to_owned(),
+            name: "codex-api".into(),
         });
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        snapshots("confirm_remove", &app)
     }
 
     #[test]
-    fn snapshot_help_popup() {
-        let mut app = populated();
+    fn snapshot_help() -> anyhow::Result<()> {
+        let mut app = full_network();
         app.popup = Some(Popup::Help);
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        snapshots("help", &app)
     }
 
     #[test]
-    fn snapshot_logs_tab() {
-        let mut app = populated();
-        app.tab = Tab::Logs;
-        app.logs = (1..=40).map(|n| format!("log line {n}")).collect();
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+    fn snapshot_help_scrolled() -> anyhow::Result<()> {
+        let mut app = full_network();
+        app.popup = Some(Popup::Help);
+        app.help_scroll = 99;
+        snapshots("help_scrolled", &app)
     }
 
     #[test]
-    fn snapshot_network_tab_populated() {
-        let mut app = populated();
-        app.tab = Tab::Network;
-        app.network_row = 2;
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
-    }
-
-    #[test]
-    fn snapshot_network_tab_empty() {
-        let mut app = populated();
-        app.tab = Tab::Network;
-        app.selected = 1;
-        app.set_network(Some(Preset::LockedDown), Vec::new());
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
-    }
-
-    #[test]
-    fn snapshot_network_tab_older_sandbox() {
-        let mut app = populated();
-        app.tab = Tab::Network;
-        app.selected = 2;
-        app.sandboxes[2].agent = Some("shell".to_owned());
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
-    }
-
-    #[test]
-    fn snapshot_network_tab_foreign_sandbox() {
-        let mut app = populated();
-        app.tab = Tab::Network;
-        app.selected = 2;
-        app.sandboxes[2].agent = None;
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
-    }
-
-    #[test]
-    fn snapshot_preset_popup() {
+    fn snapshot_preset() -> anyhow::Result<()> {
         let mut app = populated();
         app.popup = Some(Popup::Preset {
             index: 1,
             then_create: true,
         });
-        insta::assert_snapshot!(draw(&app, 100, 30).backend());
+        snapshots("preset", &app)
     }
 
     #[test]
-    fn network_tab_scrolls_to_the_cursor() {
-        let mut app = populated();
-        app.tab = Tab::Network;
-        app.network_row = 3;
-        // 8 rows of detail: title, tabs, rule, header, blank, then 3 visible rows.
-        let terminal = draw(&app, 100, 10);
-        let text = format!("{:?}", terminal.backend().buffer());
-        assert!(text.contains("registry.npmjs.org"), "{text}");
-        assert!(!text.contains("pypi.org:443"), "{text}");
+    fn snapshot_full_rules() -> anyhow::Result<()> {
+        let mut app = rules();
+        app.full_network = true;
+        app.status_filter = crate::app::StatusFilter::Allowed;
+        snapshots("full_rules", &app)
     }
 
     #[test]
-    fn snapshot_scrolls_to_selected_card() {
-        let mut app = populated();
-        app.selected = 3;
-        insta::assert_snapshot!(draw(&app, 100, 16).backend());
+    fn snapshot_full_rules_empty() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Rules);
+        app.full_network = true;
+        snapshots("full_rules_empty", &app)
     }
 
     #[test]
-    fn snapshot_narrow() {
-        let mut app = populated();
-        app.popup = Some(Popup::Create { agent_index: 0 });
-        insta::assert_snapshot!(draw(&app, 60, 20).backend());
+    fn snapshot_network_expanded() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Network);
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        snapshots("network_expanded", &app)
     }
 
     #[test]
-    fn narrow_and_tiny_terminals_do_not_panic() {
+    fn snapshot_network_filtered() -> anyhow::Result<()> {
+        let mut app = full_network();
+        app.status_filter = crate::app::StatusFilter::Blocked;
+        app.sandbox_filter = Some("pi-notes".into());
+        snapshots("network_filtered", &app)
+    }
+
+    #[test]
+    fn snapshot_folder_loading() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Folder);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.folder.loading = true;
+        }
+        snapshots("folder_loading", &app)
+    }
+
+    fn long_connection() -> App {
+        let mut app = full_network();
+        let mut row = entry(
+            &"sandbox-".repeat(15),
+            &format!("{}.example.com", "long-host-".repeat(23)),
+            65535,
+            false,
+            999_999,
+            "12:04:51",
+        );
+        row.allowed_count = 1;
+        row.blocked_count = 999_998;
+        app.set_network(Some(Preset::Balanced), vec![row]);
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        app
+    }
+
+    #[test]
+    fn snapshot_long_network_details() -> anyhow::Result<()> {
+        snapshots("network_long_details", &long_connection())
+    }
+
+    #[test]
+    fn snapshot_long_network_details_scrolled() -> anyhow::Result<()> {
+        let mut app = long_connection();
+        app.detail_scroll = 128;
+        snapshots("network_long_details_scrolled", &app)
+    }
+
+    #[test]
+    fn expanded_long_identity_scrolls_without_blanking() -> anyhow::Result<()> {
+        let mut app = long_connection();
+        let first = draw(&app, 60, 20)?.backend().to_string();
+        assert!(first.contains("PgUp") && first.contains("PgDn"), "{first}");
+        app.set_detail_scroll_limit(detail_scroll_limit(&app, 60, 20));
+        for _ in 0..10 {
+            press(&mut app, crossterm::event::KeyCode::PageDown);
+        }
+        let last = draw(&app, 60, 20)?.backend().to_string();
+        assert!(last.contains("Blocked hits: 999998"), "{last}");
+        assert!(last.contains("Last seen:"), "{last}");
+        Ok(())
+    }
+
+    fn long_rule_confirmation() -> App {
+        let mut app = rules();
+        app.popup = Some(Popup::ConfirmRuleRemove {
+            rule: RuleInfo {
+                target: format!("{}.example.com:443", "long-target-".repeat(19)),
+                source: Source::Sandbox,
+                sandbox: Some(format!("{}scope-tail", "sandbox-".repeat(14))),
+                allowed: false,
+            },
+        });
+        app
+    }
+
+    #[test]
+    fn confirmation_keeps_full_rule_and_scope_visible() -> anyhow::Result<()> {
+        let app = long_rule_confirmation();
+        let text = draw(&app, 60, 20)?.backend().to_string();
+        assert!(text.contains("Future connections"), "{text}");
+        let compact: String = text
+            .chars()
+            .filter(|character| {
+                character.is_ascii() && !character.is_whitespace() && *character != '\"'
+            })
+            .collect();
+        if let Some(Popup::ConfirmRuleRemove { rule }) = &app.popup {
+            assert!(compact.contains(&rule.target), "{text}");
+            assert!(
+                compact.contains(rule.sandbox.as_deref().unwrap_or_default()),
+                "{text}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_long_rule_confirmation() -> anyhow::Result<()> {
+        snapshots("rule_remove_long", &long_rule_confirmation())
+    }
+
+    fn agent_with_long_credential() -> App {
+        let mut app = with_wizard(CreateStage::Agent);
+        app.credentials[0] = format!(
+            "shared login: unknown ({})",
+            "long filesystem error ".repeat(30)
+        );
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.agent_index = 2;
+        }
+        app
+    }
+
+    #[test]
+    fn selected_agent_is_visible_after_long_credential_errors() -> anyhow::Result<()> {
+        let text = draw(&agent_with_long_credential(), 60, 20)?
+            .backend()
+            .to_string();
+        assert!(text.contains("▸ shell"), "{text}");
+        assert!(text.contains("none required"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_agent_credential_unknown() -> anyhow::Result<()> {
+        snapshots("agent_credentials_unknown", &agent_with_long_credential())
+    }
+
+    #[test]
+    fn wrapped_log_scroll_limit_reaches_the_last_line() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Logs);
+        app.logs = vec![format!("{} tail-marker", "long-line-".repeat(120))];
+        let limit = detail_scroll_limit(&app, 60, 20);
+        assert!(limit > 0);
+        app.detail_scroll = limit;
+        let text = draw(&app, 60, 20)?.backend().to_string();
+        assert!(text.contains("tail-marker"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn help_at_bottom_reverses_after_one_up() -> anyhow::Result<()> {
+        let mut app = full_network();
+        press(&mut app, crossterm::event::KeyCode::Char('?'));
+        app.set_help_scroll_limit(help_scroll_limit(&app, 60, 20));
+        for _ in 0..30 {
+            press(&mut app, crossterm::event::KeyCode::Down);
+        }
+        let bottom = draw(&app, 60, 20)?.backend().to_string();
+        assert!(bottom.contains("5–19/19"), "{bottom}");
+        press(&mut app, crossterm::event::KeyCode::Up);
+        let previous = draw(&app, 60, 20)?.backend().to_string();
+        assert!(previous.contains("4–18/19"), "{previous}");
+        assert_eq!(app.help_scroll, 3);
+        app.set_help_scroll_limit(help_scroll_limit(&app, 100, 30));
+        assert_eq!(app.help_scroll, 0);
+        let resized = draw(&app, 100, 30)?.backend().to_string();
+        assert!(resized.contains("1–19/19"), "{resized}");
+        app.set_help_scroll_limit(help_scroll_limit(&app, 60, 16));
+        for _ in 0..30 {
+            press(&mut app, crossterm::event::KeyCode::Down);
+        }
+        assert_eq!(app.help_scroll, 8);
+        app.set_help_scroll_limit(help_scroll_limit(&app, 60, 20));
+        assert_eq!(app.help_scroll, 4);
+        press(&mut app, crossterm::event::KeyCode::Up);
+        assert_eq!(app.help_scroll, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn rules_do_not_advertise_an_inactive_status_filter() -> anyhow::Result<()> {
+        let mut app = rules();
+        app.full_network = true;
+        app.status_filter = crate::app::StatusFilter::Allowed;
+        let text = draw(&app, 60, 20)?.backend().to_string();
+        assert!(!text.contains("o Allowed"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn focused_pane_is_named_at_narrow_widths() -> anyhow::Result<()> {
         let mut app = populated();
-        for popup in [
-            None,
-            Some(Popup::Help),
-            Some(Popup::Create { agent_index: 0 }),
-            Some(Popup::Preset {
-                index: 0,
-                then_create: false,
-            }),
+        for (width, height) in [(80, 24), (60, 20)] {
+            let cards = draw(&app, width, height)?.backend().to_string();
+            assert!(cards.contains("> Sandboxes"), "{cards}");
+            press(&mut app, crossterm::event::KeyCode::Right);
+            let detail = draw(&app, width, height)?.backend().to_string();
+            assert!(detail.contains("> Details"), "{detail}");
+            press(&mut app, crossterm::event::KeyCode::Left);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn full_network_names_table_columns_and_filter_controls() -> anyhow::Result<()> {
+        let text = draw(&full_network(), 80, 24)?.backend().to_string();
+        for expected in ["All sandboxes", "Host", "Port", "Hits", "Status", "Sandbox"] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn table_truncation_is_explicit_for_large_counts() -> anyhow::Result<()> {
+        let mut app = full_network();
+        app.set_network(
+            Some(Preset::Balanced),
+            vec![entry(
+                "long-sandbox-name",
+                "long-endpoint-name.example.com",
+                443,
+                true,
+                123_456,
+                "12:04:51",
+            )],
+        );
+        let text = draw(&app, 60, 20)?.backend().to_string();
+        assert!(text.contains("1234…"), "{text}");
+        assert!(text.contains("long-sand…"), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn no_color_resets_cells_and_keeps_focus_and_status() -> anyhow::Result<()> {
+        let mut app = detail(Tab::Network);
+        app.no_color = true;
+        let terminal = draw(&app, 60, 20)?;
+        for cell in &terminal.backend().buffer().content {
+            assert_eq!(cell.fg, Color::Reset);
+            assert_eq!(cell.bg, Color::Reset);
+        }
+        let text = terminal.backend().to_string();
+        assert!(text.contains("> Detail"));
+        assert!(text.contains("Blocked"));
+        assert!(text.contains("Allowed"));
+        Ok(())
+    }
+
+    #[test]
+    fn selected_row_past_a_page_and_full_details_remain_visible() -> anyhow::Result<()> {
+        let mut app = full_network();
+        app.set_network(
+            Some(Preset::Balanced),
+            (0..30)
+                .map(|index| {
+                    entry(
+                        "codex-api",
+                        &format!("host-{index}.example.com"),
+                        443,
+                        false,
+                        7,
+                        "12:04:51",
+                    )
+                })
+                .collect(),
+        );
+        app.network_row = 29;
+        press(&mut app, crossterm::event::KeyCode::Enter);
+        let text = draw(&app, 60, 20)?.backend().to_string();
+        for expected in [
+            "host-29.example.com",
+            "First seen",
+            "Last seen",
+            "Allowed hits",
+            "Blocked hits",
+            "codex-api",
         ] {
-            for tab in [Tab::Overview, Tab::Logs, Tab::Network] {
-                app.tab = tab;
-                app.popup = popup.clone();
-                draw(&app, 60, 20);
-                draw(&app, 10, 3);
-                draw(&app, 1, 1);
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn long_input_keeps_its_cursor_inside_the_frame() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Configure);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.name.set_text(&"long-project-".repeat(20));
+        }
+        let mut terminal = draw(&app, 60, 20)?;
+        let cursor = ratatui::backend::Backend::get_cursor_position(terminal.backend_mut())?;
+        assert!(cursor.x < 60 && cursor.y < 20);
+        Ok(())
+    }
+
+    #[test]
+    fn narrow_and_tiny_terminals_do_not_panic() -> anyhow::Result<()> {
+        let mut apps = vec![
+            populated(),
+            full_network(),
+            rules(),
+            with_wizard(CreateStage::Agent),
+            with_wizard(CreateStage::Configure),
+            with_wizard(CreateStage::Folder),
+        ];
+        let mut help = populated();
+        help.popup = Some(Popup::Help);
+        apps.push(help);
+        for app in apps {
+            for (width, height) in [(60, 20), (10, 3), (1, 1)] {
+                draw(&app, width, height)?;
             }
         }
+        Ok(())
     }
 }

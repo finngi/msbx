@@ -65,11 +65,12 @@ From the same folder, run:
 msbx
 ```
 
-1. `shell-msbx-tutorial` is on the left with live CPU and memory. Press `Tab` to see its Logs,
-   `Tab` again for the Network tab (what the sandbox reached and what was blocked), and once
-   more for the Overview.
-2. Press `Enter` to attach. You are back in `bash` in the VM. Type `exit` and the dashboard
-   returns, showing `exited shell-msbx-tutorial (code 0)`.
+1. `shell-msbx-tutorial` is selected in Cards with live CPU and memory. Press `Tab` to focus
+   Detail, then `]` for Logs and again for Network (what the sandbox reached and what was
+   blocked). Use `[` to return through the tabs. On a narrow terminal, only the focused pane
+   is shown.
+2. Press `Tab` to focus Cards, then `Enter` to attach. You are back in `bash` in the VM. Type
+   `exit` and the dashboard returns, showing `exited shell-msbx-tutorial (code 0)`.
 3. Press `s` to stop the sandbox. Its status changes to stopped. Press `s` again to start it.
 4. Press `r`, then `y`, to remove it.
 5. Press `q` to quit.

@@ -35,6 +35,7 @@ Each RFC starts with a short metadata list:
 | 0007 | [Worktrees](0007-worktrees.md) | Several agents on one repo at once, each on its own branch | 0001 |
 | 0008 | [Network](0008-network.md) (implemented) | Allow and deny hosts per sandbox, live, through the msbx proxy; see what was blocked | none |
 | 0009 | [Ports](0009-ports.md) | Open a dev server running in the sandbox from your browser, without restarting it | none |
+| 0010 | [Dashboard](0010-dashboard.md) | Consistent pane navigation, a create wizard and network inspection and rule editing | 0008 |
 
 ```mermaid
 flowchart LR

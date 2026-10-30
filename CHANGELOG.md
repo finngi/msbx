@@ -10,6 +10,11 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Added
 
+- Dashboard create wizard with agent descriptions, credential availability, an editable name and a workspace folder picker.
+- Expandable network rows with endpoint history and allowed/blocked counts; `n` opens traffic across all sandboxes with search, status and sandbox filters.
+- Dashboard Rules view with preset, global and sandbox rules; add rules or confirm removal of explicit rules.
+- Contextual help and footer from one keymap, narrow-terminal layouts and `NO_COLOR` support.
+
 - `msbx agent -d` creates or starts the agent's sandbox without attaching.
 
 - `msbx agent <codex|pi|shell> [PATH] [-- ARGS]`: create or reuse a per-project sandbox named `<agent>-<folder>` and attach to it.
@@ -22,10 +27,12 @@ Before 1.0.0, minor versions may contain breaking changes.
 - The `OPENAI_API_KEY is not set` note now suggests `msbx secret set`.
 - Network policy (RFC 0008): new sandboxes send public TCP traffic through the msbx proxy on `127.0.0.1:47447`, which applies `~/.config/msbx/policy.toml` live: presets `open`, `balanced` and `locked-down`, sbx-style targets (`example.com`, `*.example.com`, `**.example.com`, `**`, `:port`, IPs, CIDRs), global and per-sandbox allow and deny rules, deny over allow.
 - `msbx policy init|ls|allow|deny|rm|check|log|preset` and `msbx proxy serve|status|stop`. The first `msbx agent` asks for a preset.
-- Dashboard: a Network tab per sandbox with the proxy's log (`a` allow here, `A` allow everywhere, `d` deny, `p` preset), `policy <preset> (proxied)` and a traffic row on the Overview.
+- Dashboard: a Network tab per sandbox with the proxy's log (`a` allow here, `A` allow everywhere, `b` block, `p` preset), `policy <preset> (proxied)` and a traffic row on the Overview.
 - `msbx start NAME` and other pass-through commands put the proxy token in `msb`'s environment and start the proxy when needed.
 
 ### Changed
+
+- Dashboard navigation: `Tab` and horizontal arrows switch panes, vertical arrows move within the focused pane, and `[` / `]` change detail tabs. Network blocking uses `b`.
 
 - Creating a sandbox from the dashboard no longer attaches. The dashboard stays open, shows progress on the status line and selects the new card; press `Enter` to attach.
 - The Network tab tells sandboxes msbx did not create apart from ones created before network policy.

@@ -1,13 +1,13 @@
 # Sandbox defaults
 
-`msbx agent` and the dashboard's create popup create sandboxes with these settings. They are
+`msbx agent` and the dashboard's create wizard create sandboxes with these settings. They are
 applied only when the sandbox is created; to change them,
 [remove and recreate it](../how-to/remove-or-reset.md). The one exception is the network
 policy, which the proxy applies live (see [Control network access](../how-to/control-network-access.md)).
 
 | Setting | Value |
 |---|---|
-| Name | `<agent>-<folder>`, see [Commands](commands.md#msbx-agent) |
+| Name | `<agent>-<folder>` by default; editable in the dashboard wizard. The CLI keeps its generated name; see [Commands](commands.md#msbx-agent). |
 | Image | `node:24-bookworm-slim` |
 | Mount | The project folder, read-write, at the same absolute path as on the host |
 | Working directory | The project folder |

@@ -1,6 +1,8 @@
 mod agents;
 mod app;
 mod attach;
+mod input;
+mod keymap;
 mod model;
 mod models;
 mod netlog;
@@ -11,6 +13,9 @@ mod proxy;
 mod sandbox;
 mod secrets;
 mod tui;
+mod tui_data;
+#[cfg(debug_assertions)]
+mod tui_fixture;
 mod ui;
 mod wire;
 
@@ -182,6 +187,11 @@ async fn run(cli: Cli) -> Result<u8> {
     let dirs = Dirs::from_env()?;
     match cli.command {
         None => {
+            #[cfg(debug_assertions)]
+            if let Some(path) = std::env::var_os("MSBX_TUI_FIXTURE") {
+                tui::run_fixture(&PathBuf::from(path), dirs).await?;
+                return Ok(0);
+            }
             let project = project_folder(None)?;
             // Before any SDK call: secrets and the proxy token are read from msbx's environment
             // when a VM boots.
