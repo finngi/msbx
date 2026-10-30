@@ -418,7 +418,11 @@ if [ -f "$guest" ] && [ ! -L "$guest" ]; then mv -f "$guest" "$shared"; fi
 if [ -e "$guest" ] && [ ! -L "$guest" ]; then exit 1; fi
 ln -sfn "$shared" "$guest"
 if [ -f "$shared" ]; then chmod 600 "$shared"; chown "$4" "$shared"; fi
-chown -h "$4" "$1" "$guest"
+chown -h "$4" "$guest"
+# `mkdir -p` ran as root: hand every folder from the agent's home down to the login folder to
+# the agent user, or it cannot use its own config folder (e.g. pi's ~/.pi above ~/.pi/agent).
+d="$1"
+while [ "$d" != "$5" ] && [ "$d" != / ]; do chown -h "$4" "$d"; d=$(dirname "$d"); done
 "#;
 
 /// Guest shell script that links the agent's credential file to the login volume.
@@ -429,7 +433,7 @@ fn login_script(login: &Login, home: &str) -> String {
     let owner = if home == "/root" { "root" } else { AGENT_USER };
     format!(
         "grep -q ' {mount} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
-         set -- '{home}/{}' '{}' '{mount}' '{owner}'\n{LINK_LOGIN}",
+         set -- '{home}/{}' '{}' '{mount}' '{owner}' '{home}'\n{LINK_LOGIN}",
         login.dir, login.file
     )
 }
@@ -1054,10 +1058,12 @@ mod tests {
         command: "true",
         secrets: &[],
         login: Some(Login {
-            dir: ".logintest",
+            // Two levels, like pi's `.pi/agent`: every folder above the login file must end up
+            // owned by the agent user.
+            dir: ".logintest/agent",
             file: "auth.json",
         }),
-        models_file: Some(".logintest/models.json"),
+        models_file: Some(".logintest/agent/models.json"),
     };
 
     #[test]
@@ -1083,6 +1089,7 @@ mod tests {
             .arg("auth.json")
             .arg(root.join("volume"))
             .arg(String::from_utf8(owner.stdout)?.trim())
+            .arg(root)
             .output()?;
         anyhow::ensure!(
             output.status.success(),
@@ -1152,7 +1159,7 @@ mod tests {
         );
         assert!(
             script.contains(
-                "set -- '/home/node/.codex' 'auth.json' '/home/node/.msbx-login' 'node'\n"
+                "set -- '/home/node/.codex' 'auth.json' '/home/node/.msbx-login' 'node' '/home/node'\n"
             ),
             "{script}"
         );
@@ -1161,7 +1168,8 @@ mod tests {
         // A sandbox created before the git guard keeps its root paths.
         let older = login_script(&login, "/root");
         assert!(
-            older.contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login' 'root'\n"),
+            older
+                .contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login' 'root' '/root'\n"),
             "{older}"
         );
     }
@@ -1206,12 +1214,14 @@ mod tests {
             let first = sandbox
                 .shell(
                     "set -e\n\
-                     test \"$(readlink /home/node/.logintest/auth.json)\" = /home/node/.msbx-login/auth.json\n\
-                     echo '{\"first\":1}' > /home/node/.logintest/auth.json\n\
+                     test \"$(stat -c %U /home/node/.logintest)\" = node\n\
+                     test \"$(stat -c %U /home/node/.logintest/agent)\" = node\n\
+                     test \"$(readlink /home/node/.logintest/agent/auth.json)\" = /home/node/.msbx-login/auth.json\n\
+                     echo '{\"first\":1}' > /home/node/.logintest/agent/auth.json\n\
                      test -f /home/node/.msbx-login/auth.json\n\
-                     rm /home/node/.logintest/auth.json\n\
-                     echo '{\"second\":2}' > /home/node/.logintest/auth.json\n\
-                     cat /home/node/.logintest/models.json 2>/dev/null || true",
+                     rm /home/node/.logintest/agent/auth.json\n\
+                     echo '{\"second\":2}' > /home/node/.logintest/agent/auth.json\n\
+                     cat /home/node/.logintest/agent/models.json 2>/dev/null || true",
                 )
                 .await;
             sandbox.detach().await;
@@ -1228,7 +1238,7 @@ mod tests {
             let sandbox = Sandbox::get(&name).await?.connect().await?;
             let second = sandbox
                 .shell(
-                    "test -L /home/node/.logintest/auth.json && \
+                    "test -L /home/node/.logintest/agent/auth.json && \
                      stat -c %a /home/node/.msbx-login/auth.json && cat /home/node/.msbx-login/auth.json",
                 )
                 .await;
