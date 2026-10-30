@@ -28,7 +28,7 @@ msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a sin
 - Sandbox defaults:
   - the project folder is mounted at the same path as on the host
   - all host CPUs, with a 32 GiB memory limit
-  - outbound traffic through the msbx proxy under your policy, plus Ollama and LM Studio on the host (`host.microsandbox.internal:11434` and `:1234`)
+  - outbound traffic through the msbx proxy under your policy, plus chosen ports on your Mac (`host.microsandbox.internal`; by default 11434 for Ollama and 1234 for LM Studio)
   - agent API keys stay on the host: the VM sees only a placeholder, and microsandbox's secret proxy substitutes the real key on the way out
   - `node:24-bookworm-slim` image, with the agent installed once at creation
 
@@ -110,10 +110,14 @@ msbx policy deny "**.example.com" --sandbox codex-api  # one sandbox; deny beats
 msbx policy check pypi.org:443                         # Allowed or Blocked, exit 1 when blocked
 msbx policy log codex-api --blocked                    # what the proxy refused
 msbx policy ls                                         # effective rules and their source
+msbx policy host-ports 11434 1234 8080                 # Mac ports new sandboxes may reach
 msbx proxy status                                      # the proxy on 127.0.0.1:47447
 ```
 
-Rules live in `~/.config/msbx/policy.toml` and apply to the next connection; nothing restarts. The proxy starts itself when msbx needs it and keeps running after msbx exits, like the sandboxes. Use `msbx start NAME` (not `msb start`) for proxied sandboxes: msbx hands `msb` the proxy token. See [Control network access](https://finngi.github.io/msbx/how-to/control-network-access.html).
+Rules live in `~/.config/msbx/policy.toml` and apply to the next connection; nothing restarts.
+Host ports are different: traffic to your Mac never passes the proxy, so they are fixed when a
+sandbox is created. `msbx policy host-ports` (or `Ctrl-S` in the dashboard) changes them for new
+sandboxes and names the existing ones to recreate. The proxy starts itself when msbx needs it and keeps running after msbx exits, like the sandboxes. Use `msbx start NAME` (not `msb start`) for proxied sandboxes: msbx hands `msb` the proxy token. See [Control network access](https://finngi.github.io/msbx/how-to/control-network-access.html).
 
 ### Dashboard
 
@@ -136,6 +140,8 @@ The title marker shows which pane has focus. On narrow terminals, that pane fill
 | `a`, `A`, `b` | Network: allow here, allow everywhere, block here |
 | `a`, `r` | Rules: add a rule, remove an explicit rule (confirm) |
 | `p` | Choose the network preset |
+| `i` | Info for the selected sandbox: identity, resources, security, network, mounts |
+| `Ctrl-S` | Settings: default preset and host ports for new sandboxes |
 | `?` / `Ctrl-H` | Help for the current view |
 | `q` / `Ctrl-C` | Quit |
 
@@ -179,7 +185,7 @@ What it leaves open:
 
 - The project folder is writable from the VM. An agent can modify or delete anything in it, including the history under `.git`. Commit or back up first.
 - Network access follows your policy. The proxy decides by the host name in the TLS handshake or HTTP `Host` header, checked against DNS on your machine; traffic with no name is decided by IP. DNS itself is unrestricted, and an allowed host can still receive project contents.
-- Host services at `host.microsandbox.internal`: only ports 11434 (Ollama) and 1234 (LM Studio), fixed when the sandbox is created.
+- Host services at `host.microsandbox.internal`: only the host ports in `policy.toml` (by default 11434 for Ollama and 1234 for LM Studio), fixed when the sandbox is created. Any port you add exposes that Mac service to every sandbox created afterwards.
 - TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
 - Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox configuration (readable only by your user account).
 

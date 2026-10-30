@@ -100,6 +100,7 @@ msbx policy rm <TARGET> [--sandbox NAME]
 msbx policy check <HOST[:PORT]|IP[:PORT]> [--sandbox NAME]
 msbx policy log [NAME] [--blocked|--allowed] [--limit N]
 msbx policy preset <open|balanced|locked-down>
+msbx policy host-ports [PORT...] [--none]
 ```
 
 Edits and reads `$XDG_CONFIG_HOME/msbx/policy.toml` (default `~/.config/msbx/policy.toml`),
@@ -115,6 +116,7 @@ which the proxy applies to every new connection. See
 | `check` | Prints `Allowed` or `Blocked`, the target and the deciding rule, by name alone (no DNS). Exits 1 when blocked. Patterns and CIDRs are not accepted. |
 | `log` | The proxy's connection log: a `BLOCKED` section then an `ALLOWED` one, columns `SANDBOX HOST PORT RULE LAST-SEEN COUNT`, newest first. `NAME` limits it to one sandbox; `--limit` caps each section. |
 | `preset` | Changes the preset and keeps the rules. |
+| `host-ports` | Without arguments, prints the ports on your Mac (`host.microsandbox.internal`) that new sandboxes may reach: `host ports 1234, 11434` by default. With ports (separated by spaces or commas, 1-65535, at most 32), replaces the list; `--none` empties it, leaving only DNS. The change applies to sandboxes created from now on, since traffic to the Mac never passes the proxy; msbx names existing sandboxes created with other ports and how to recreate each. |
 
 Targets:
 

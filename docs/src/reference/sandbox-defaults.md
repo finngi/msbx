@@ -16,7 +16,7 @@ policy, which the proxy applies live (see [Control network access](../how-to/con
 | Working directory | The project folder |
 | CPUs | All host CPUs (capped at 255) |
 | Memory | 32 GiB limit. The host backs only the pages the guest touches. |
-| Network | Deny by default; DNS and TCP ports 11434 and 1234 to the host (`host.microsandbox.internal`); TCP to public addresses through the msbx proxy, which decides per host from `policy.toml` |
+| Network | Deny by default; DNS and the TCP host ports from `policy.toml` (default 11434 and 1234) to the host (`host.microsandbox.internal`); TCP to public addresses through the msbx proxy, which decides per host from `policy.toml` |
 | Proxy | HTTP CONNECT to `127.0.0.1:47447`, Basic credentials: the sandbox name and the token from `MSBX_PROXY_TOKEN` (read on the host at each start, like secrets) |
 | Secrets | The agent's API keys, if set on the host (see below) |
 | Labels | `msbx.agent=<agent>`, `msbx.project=<absolute project path>`, `msbx.network=proxy`, `msbx.git=guarded` (or `none` when the project has no repository) |

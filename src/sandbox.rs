@@ -13,7 +13,9 @@ use microsandbox::{
     MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkAction, NetworkPolicy, Sandbox,
     SandboxMetrics, SecretSource, Volume,
 };
-use microsandbox_types::{Action, Destination, DestinationGroup, Direction, NetworkSpec};
+use microsandbox_types::{
+    Action, Destination, DestinationGroup, Direction, NetworkSpec, PortRange, Protocol,
+};
 
 use crate::agents::{self, Agent, Login};
 use crate::model::{SandboxInfo, Status, validate_name};
@@ -38,9 +40,6 @@ const GIT_NONE: &str = "none";
 /// it cannot unmount the read-only git mounts; under the `restricted` profile neither can root.
 const AGENT_USER: &str = "node";
 
-/// Host ports the sandbox may reach directly (Ollama, LM Studio); fixed at create because
-/// host-bound traffic never goes through the proxy.
-const HOST_MODEL_PORTS: [u16; 2] = [11434, 1234];
 const INSTALL_MARKER: &str = "/root/.msbx-installed";
 
 /// Guest mount point of the per-agent login volume (RFC 0004), under the agent user's home.
@@ -125,9 +124,24 @@ enum ExistingMode {
 /// first use, and returns the sandbox name. The VM keeps running after this returns.
 ///
 /// `project` must be absolute; it is mounted and used as the working directory at the same path.
-pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) -> Result<String> {
+/// `host_ports` (from `policy.toml`) are the Mac ports a newly created sandbox may reach; an
+/// existing sandbox keeps the ports it was created with.
+pub(crate) async fn ensure(
+    agent: &Agent,
+    project: &Path,
+    host_ports: &[u16],
+    notify: Notify<'_>,
+) -> Result<String> {
     let name = sandbox_name(agent, project);
-    ensure_with_mode(agent, project, &name, ExistingMode::Reuse, notify).await
+    ensure_with_mode(
+        agent,
+        project,
+        &name,
+        ExistingMode::Reuse,
+        host_ports,
+        notify,
+    )
+    .await
 }
 
 /// Creates the dashboard's custom name, failing if another creator claims it first.
@@ -135,9 +149,18 @@ pub(crate) async fn ensure_named(
     agent: &Agent,
     project: &Path,
     name: &str,
+    host_ports: &[u16],
     notify: Notify<'_>,
 ) -> Result<String> {
-    ensure_with_mode(agent, project, name, ExistingMode::CreateOnly, notify).await
+    ensure_with_mode(
+        agent,
+        project,
+        name,
+        ExistingMode::CreateOnly,
+        host_ports,
+        notify,
+    )
+    .await
 }
 
 async fn ensure_with_mode(
@@ -145,6 +168,7 @@ async fn ensure_with_mode(
     project: &Path,
     name: &str,
     mode: ExistingMode,
+    host_ports: &[u16],
     notify: Notify<'_>,
 ) -> Result<String> {
     validate_name(name).map_err(anyhow::Error::msg)?;
@@ -157,7 +181,7 @@ async fn ensure_with_mode(
         ensure_login_volume(volume, agent.id).await?;
     }
 
-    let static_policy = proxied_policy()?;
+    let static_policy = proxied_policy(host_ports)?;
     let (secrets, missing) = agents::select_secrets(agent, |var| std::env::var(var).ok());
     for var in missing {
         notify(format!(
@@ -244,16 +268,23 @@ async fn ensure_with_mode(
     prepared.map(|()| name.to_owned())
 }
 
-/// The static policy of a proxied sandbox: deny by default, DNS and the local model ports on the
-/// host, and TCP to public addresses (which msb then sends through the proxy). Private, loopback,
+/// The static policy of a proxied sandbox: deny by default, DNS and `host_ports` on the host,
+/// and TCP to public addresses (which msb then sends through the proxy). Private, loopback,
 /// link-local and metadata addresses match no rule, so the default denies them.
 /// Rules are first-match (microsandbox-network 0.7.11 `NetworkPolicy::evaluate_egress`).
-fn proxied_policy() -> Result<NetworkPolicy> {
-    NetworkPolicy::builder()
+///
+/// Host traffic never goes through the proxy (`proxy/types.rs:206` `select_for_destination`),
+/// so these ports are fixed at create; `modify()` has no network option.
+fn proxied_policy(host_ports: &[u16]) -> Result<NetworkPolicy> {
+    let mut builder = NetworkPolicy::builder()
         .default_egress(NetworkAction::Deny)
         .default_ingress(NetworkAction::Allow)
-        .egress(|rule| rule.udp().tcp().port(53).allow_host())
-        .egress(|rule| rule.tcp().ports(HOST_MODEL_PORTS).allow_host())
+        .egress(|rule| rule.udp().tcp().port(53).allow_host());
+    // A rule with no ports matches every port, so "no host ports" must mean no rule.
+    if !host_ports.is_empty() {
+        builder = builder.egress(|rule| rule.tcp().ports(host_ports.iter().copied()).allow_host());
+    }
+    builder
         .egress(|rule| rule.tcp().allow_public())
         .build()
         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -649,23 +680,42 @@ fn info(handle: &SandboxHandle, metrics: Option<&SandboxMetrics>) -> SandboxInfo
     let config = handle.config().ok();
     let spec = config.as_ref().map(|config| &config.spec);
     let configured_memory = spec.map(|spec| u64::from(spec.resources.memory_mib) * 1024 * 1024);
+    let proxied = spec.is_some_and(|spec| {
+        spec.labels.get(LABEL_NETWORK).map(String::as_str) == Some(NETWORK_PROXY)
+    });
     SandboxInfo {
         name: handle.name().to_owned(),
         status: status(handle.status_snapshot()),
         agent: spec.and_then(|spec| spec.labels.get(LABEL_AGENT).cloned()),
         project: spec.and_then(|spec| spec.labels.get(LABEL_PROJECT).map(PathBuf::from)),
         image: spec.map(|spec| image(&spec.image)),
+        created: handle.created_at().map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        }),
         vcpus: spec.map(|spec| spec.resources.cpus),
         cpu_percent: metrics.map(|metrics| f64::from(metrics.cpu_percent)),
         memory_bytes: metrics.map(|metrics| metrics.memory_bytes),
         memory_limit_bytes: metrics
             .map(|metrics| metrics.memory_limit_bytes)
             .or(configured_memory),
+        disk_used_bytes: metrics.and_then(|metrics| metrics.upper_used_bytes),
+        disk_free_bytes: metrics.and_then(|metrics| metrics.upper_free_bytes),
         uptime: metrics.map(|metrics| metrics.uptime),
         network: spec.map(|spec| network_summary(&spec.network)),
-        proxied: spec.is_some_and(|spec| {
-            spec.labels.get(LABEL_NETWORK).map(String::as_str) == Some(NETWORK_PROXY)
+        proxied,
+        host_ports: spec
+            .filter(|_| proxied)
+            .and_then(|spec| stored_host_ports(&spec.network)),
+        // No user means the image's default user.
+        user: spec.map(|spec| {
+            spec.runtime
+                .user
+                .clone()
+                .unwrap_or_else(|| "image default".to_owned())
         }),
+        restricted: spec.map(|spec| spec.security_profile == SecurityProfile::Restricted),
         git_guarded: spec.is_some_and(|spec| spec.labels.contains_key(LABEL_GIT)),
         rx_bytes: metrics.map(|metrics| metrics.net_rx_bytes),
         tx_bytes: metrics.map(|metrics| metrics.net_tx_bytes),
@@ -704,6 +754,29 @@ fn mount(mount: &VolumeMount) -> String {
         VolumeMount::Named { name, guest, .. } => format!("{name} -> {guest}"),
         other => other.guest().to_owned(),
     }
+}
+
+/// The host ports a stored static policy allows: the port-scoped egress allows to the host
+/// group, without the DNS rule (UDP and TCP 53) every msbx and msb policy carries. `None` when
+/// no policy was stored.
+fn stored_host_ports(network: &NetworkSpec) -> Option<Vec<u16>> {
+    let policy = network.policy.as_ref()?;
+    let dns = [PortRange { start: 53, end: 53 }];
+    let mut ports: Vec<u16> = policy
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.action == Action::Allow
+                && rule.direction != Direction::Ingress
+                && rule.destination == Destination::Group(DestinationGroup::Host)
+                && !rule.ports.is_empty()
+                && !(rule.ports == dns && rule.protocols.contains(&Protocol::Udp))
+        })
+        .flat_map(|rule| rule.ports.iter().flat_map(|range| range.start..=range.end))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
 }
 
 /// Names the destination groups the policy allows outbound, e.g. `public + host`.
@@ -801,6 +874,7 @@ async fn get(name: &str) -> Result<SandboxHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::DEFAULT_HOST_PORTS;
 
     #[expect(
         clippy::needless_pass_by_value,
@@ -810,7 +884,7 @@ mod tests {
         eprintln!("{note}");
     }
     use crate::agents::AgentId;
-    use microsandbox_types::{NetworkPolicy as StoredPolicy, PortRange, Protocol, Rule};
+    use microsandbox_types::{NetworkPolicy as StoredPolicy, Rule};
 
     fn name_for(folder: &str) -> String {
         sandbox_name(AgentId::Shell.agent(), &Path::new("/work").join(folder))
@@ -951,6 +1025,42 @@ mod tests {
         assert_eq!(network_summary(&network), "disabled");
     }
 
+    /// What create stores: the SDK serialises the built policy into the sandbox spec.
+    fn stored(policy: &NetworkPolicy) -> Result<NetworkSpec> {
+        Ok(NetworkSpec {
+            enabled: true,
+            policy: Some(serde_json::from_value(serde_json::to_value(policy)?)?),
+            ..NetworkSpec::default()
+        })
+    }
+
+    #[test]
+    fn proxied_policy_allows_exactly_the_configured_host_ports() -> Result<()> {
+        let policy = proxied_policy(&[8080, 1234])?;
+        assert_eq!(policy.default_egress, NetworkAction::Deny);
+        assert_eq!(stored_host_ports(&stored(&policy)?), Some(vec![1234, 8080]));
+        assert_eq!(network_summary(&stored(&policy)?), "public");
+
+        // An empty port list would match every port, so no ports means no host rule at all.
+        let closed = proxied_policy(&[])?;
+        assert_eq!(stored_host_ports(&stored(&closed)?), Some(vec![]));
+        let host_rules: Vec<_> = stored(&closed)?
+            .policy
+            .context("stored policy")?
+            .rules
+            .into_iter()
+            .filter(|rule| rule.destination == Destination::Group(DestinationGroup::Host))
+            .collect();
+        assert_eq!(host_rules.len(), 1, "only DNS: {host_rules:?}");
+        assert_eq!(host_rules[0].ports, [PortRange { start: 53, end: 53 }]);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_host_ports_need_a_readable_policy() {
+        assert_eq!(stored_host_ports(&NetworkSpec::default()), None);
+    }
+
     /// The msbx dirs for a VM test, from `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, which must be
     /// set (to temporary folders) so no test touches the real `~/.config/msbx`.
     fn test_dirs() -> Result<crate::paths::Dirs> {
@@ -1004,7 +1114,7 @@ mod tests {
         let project = project.canonicalize()?;
         let agent = AgentId::Shell.agent();
 
-        let created = ensure(agent, &project, &print_note).await;
+        let created = ensure(agent, &project, &DEFAULT_HOST_PORTS, &print_note).await;
         let outcome = async {
             let name = created?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -1199,7 +1309,7 @@ mod tests {
         let volume = login_volume(&LOGIN_AGENT).context("login agent has a volume")?;
         let host_models = models::guest_models_json()?;
 
-        let name = ensure(&LOGIN_AGENT, &project, &print_note).await?;
+        let name = ensure(&LOGIN_AGENT, &project, &DEFAULT_HOST_PORTS, &print_note).await?;
         // Boxed: the many awaits make this future too large for clippy's stack budget.
         let outcome = Box::pin(async {
             let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -1224,7 +1334,7 @@ mod tests {
             }
 
             // The second ensure moves the fresh sign-in into the volume and restores the link.
-            ensure(&LOGIN_AGENT, &project, &print_note).await?;
+            ensure(&LOGIN_AGENT, &project, &DEFAULT_HOST_PORTS, &print_note).await?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
             let second = sandbox
                 .shell(
@@ -1271,7 +1381,7 @@ mod tests {
         std::fs::create_dir_all(&project)?;
         let project = project.canonicalize()?;
 
-        let name = ensure(&SECRET_AGENT, &project, &print_note).await?;
+        let name = ensure(&SECRET_AGENT, &project, &DEFAULT_HOST_PORTS, &print_note).await?;
         let outcome = async {
             let handle = Sandbox::get(&name).await?;
             let stored = format!(
@@ -1387,7 +1497,7 @@ mod tests {
             anyhow::ensure!(output.status.success(), "git {args:?} failed");
         }
 
-        let created = ensure(&GUARD_AGENT, &project, &print_note).await;
+        let created = ensure(&GUARD_AGENT, &project, &DEFAULT_HOST_PORTS, &print_note).await;
         let outcome = Box::pin(async {
             let name = created?;
             let config = Sandbox::get(&name).await?.config()?;
@@ -1494,7 +1604,7 @@ mod tests {
             .join("proj");
         std::fs::create_dir_all(&project)?;
         let project = project.canonicalize()?;
-        let name = ensure(&NET_AGENT, &project, &print_note).await?;
+        let name = ensure(&NET_AGENT, &project, &DEFAULT_HOST_PORTS, &print_note).await?;
         let outcome = Box::pin(async {
             let config = Sandbox::get(&name).await?.config()?;
             let stored = config.spec.network.policy.context("policy stored")?;

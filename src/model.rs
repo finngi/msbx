@@ -22,15 +22,27 @@ pub(crate) struct SandboxInfo {
     /// From the `msbx.project` label.
     pub(crate) project: Option<PathBuf>,
     pub(crate) image: Option<String>,
+    /// When the sandbox was created, local time, formatted in IO.
+    pub(crate) created: Option<String>,
     pub(crate) vcpus: Option<u8>,
     pub(crate) cpu_percent: Option<f64>,
     pub(crate) memory_bytes: Option<u64>,
     pub(crate) memory_limit_bytes: Option<u64>,
+    /// The writable root filesystem layer, used and free, while the guest reports it.
+    pub(crate) disk_used_bytes: Option<u64>,
+    pub(crate) disk_free_bytes: Option<u64>,
     pub(crate) uptime: Option<Duration>,
     /// Human summary of the static network policy, e.g. `public + host`.
     pub(crate) network: Option<String>,
     /// Created with the msbx proxy (label `msbx.network=proxy`), so `policy.toml` applies.
     pub(crate) proxied: bool,
+    /// Mac ports the sandbox's stored static policy allows, as set at create (DNS excluded).
+    /// `None` when the sandbox is not proxied or its config cannot be read.
+    pub(crate) host_ports: Option<Vec<u16>>,
+    /// The guest user commands run as; `None` when the config cannot be read.
+    pub(crate) user: Option<String>,
+    /// Created under microsandbox's `restricted` security profile; `None` when unknown.
+    pub(crate) restricted: Option<bool>,
     /// Created with the git guard (label `msbx.git`): the agent is not root and cannot change
     /// hooks or config (RFC 0001). `false` for sandboxes created before it.
     pub(crate) git_guarded: bool,

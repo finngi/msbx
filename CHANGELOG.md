@@ -14,6 +14,9 @@ Before 1.0.0, minor versions may contain breaking changes.
 - Expandable network rows with endpoint history and allowed/blocked counts; `n` opens traffic across all sandboxes with search, status and sandbox filters.
 - Dashboard Rules view with preset, global and sandbox rules; add rules or confirm removal of explicit rules.
 - Contextual help and footer from one keymap, narrow-terminal layouts and `NO_COLOR` support.
+- Configurable host ports (RFC 0011): `host_ports` in `policy.toml` (default 11434 and 1234) sets the Mac ports new sandboxes may reach at `host.microsandbox.internal`; `msbx policy host-ports [PORT…] [--none]` shows or sets them and names existing sandboxes to recreate.
+- Dashboard `i`: an Info popup for the selected sandbox with identity, resources (including disk), security, network (host ports at create versus configured now) and mount and secret names.
+- Dashboard `Ctrl-S`: Settings for the default network preset and the host ports; saving creates `policy.toml` when it does not exist.
 
 - `msbx agent -d` creates or starts the agent's sandbox without attaching.
 

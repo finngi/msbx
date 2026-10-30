@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::input::TextInput;
 use crate::keymap::{self, Command};
 use crate::model::{NetEntry, RuleInfo, SandboxInfo, Status, validate_name};
-use crate::policy::{Preset, Source, Target};
+use crate::policy::{self, DEFAULT_HOST_PORTS, Preset, Source, Target};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tab {
@@ -125,9 +125,30 @@ pub(crate) struct CreateWizard {
     pub(crate) error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsField {
+    Preset,
+    HostPorts,
+}
+
+/// The `Ctrl-S` form: the default preset and the Mac ports new sandboxes may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SettingsForm {
+    /// Index into [`Preset::ALL`].
+    pub(crate) preset: usize,
+    pub(crate) host_ports: TextInput,
+    pub(crate) field: SettingsField,
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Popup {
     Create(CreateWizard),
+    /// Details of one sandbox, kept by name so a refresh cannot switch it.
+    Info {
+        name: String,
+    },
+    Settings(SettingsForm),
     ConfirmRemove {
         name: String,
     },
@@ -192,6 +213,10 @@ pub(crate) enum Action {
         preset: Preset,
         then_create: bool,
     },
+    SaveSettings {
+        preset: Preset,
+        host_ports: Vec<u16>,
+    },
 }
 
 type NetworkKey = (String, String, u16);
@@ -210,6 +235,8 @@ pub(crate) struct App {
     pub(crate) agents: Vec<&'static str>,
     pub(crate) sandbox_name: fn(&str, &Path) -> String,
     pub(crate) policy: Option<Preset>,
+    /// The host ports `policy.toml` gives new sandboxes; `None` while it does not exist.
+    pub(crate) host_ports: Option<Vec<u16>>,
     pub(crate) network: Vec<NetEntry>,
     pub(crate) network_row: usize,
     pub(crate) rules: Vec<RuleInfo>,
@@ -224,9 +251,9 @@ pub(crate) struct App {
     pub(crate) status_filter: StatusFilter,
     pub(crate) sandbox_filter: Option<String>,
     pub(crate) detail_scroll: usize,
-    pub(crate) help_scroll: usize,
+    pub(crate) popup_scroll: usize,
     detail_scroll_limit: usize,
-    help_scroll_limit: usize,
+    popup_scroll_limit: usize,
     expanded: Option<NetworkKey>,
     search_before: String,
     /// Per sandbox, the git files of its project that changed since its last agent session
@@ -254,6 +281,7 @@ impl App {
             agents,
             sandbox_name,
             policy: None,
+            host_ports: None,
             network: Vec::new(),
             network_row: 0,
             rules: Vec::new(),
@@ -267,9 +295,9 @@ impl App {
             status_filter: StatusFilter::All,
             sandbox_filter: None,
             detail_scroll: 0,
-            help_scroll: 0,
+            popup_scroll: 0,
             detail_scroll_limit: 0,
-            help_scroll_limit: 0,
+            popup_scroll_limit: 0,
             expanded: None,
             search_before: String::new(),
             git_changes: BTreeMap::new(),
@@ -404,10 +432,10 @@ impl App {
         self.detail_scroll = self.detail_scroll.min(limit);
     }
 
-    /// Keep help state inside the measured viewport, including after resize.
-    pub(crate) fn set_help_scroll_limit(&mut self, limit: usize) {
-        self.help_scroll_limit = limit;
-        self.help_scroll = self.help_scroll.min(limit);
+    /// Keep help and info scrolling inside the measured viewport, including after resize.
+    pub(crate) fn set_popup_scroll_limit(&mut self, limit: usize) {
+        self.popup_scroll_limit = limit;
+        self.popup_scroll = self.popup_scroll.min(limit);
     }
 
     pub(crate) fn set_logs(&mut self, name: &str, logs: Vec<String>) {
@@ -496,7 +524,7 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::ALT)
             || (key.modifiers.contains(KeyModifiers::CONTROL)
-                && !matches!(key.code, KeyCode::Char('h' | 'u')))
+                && !matches!(key.code, KeyCode::Char('h' | 's' | 'u')))
         {
             return None;
         }
@@ -530,6 +558,10 @@ impl App {
             Some(Popup::AddRule { target, error, .. }) => {
                 target.insert(text);
                 *error = None;
+            }
+            Some(Popup::Settings(form)) if form.field == SettingsField::HostPorts => {
+                form.host_ports.insert(text);
+                form.error = None;
             }
             None if self.searching => {
                 self.network_search.insert(text);
@@ -576,6 +608,15 @@ impl App {
                     then_create: false,
                 });
             }
+            Command::Info => {
+                if let Some(sandbox) = self.selected_sandbox() {
+                    self.popup = Some(Popup::Info {
+                        name: sandbox.name.clone(),
+                    });
+                    self.popup_scroll = 0;
+                }
+            }
+            Command::Settings => self.open_settings(),
             Command::Allow => return self.allow(),
             Command::AllowAll => return self.rule_action(true, true),
             Command::Block => return self.rule_action(false, false),
@@ -601,8 +642,23 @@ impl App {
         None
     }
 
+    fn open_settings(&mut self) {
+        let ports = self.host_ports.as_deref().unwrap_or(&DEFAULT_HOST_PORTS);
+        let text = ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.popup = Some(Popup::Settings(SettingsForm {
+            preset: preset_index(self.policy.unwrap_or(Preset::Balanced)),
+            host_ports: TextInput::new(&text),
+            field: SettingsField::Preset,
+            error: None,
+        }));
+    }
+
     fn show_help(&mut self) {
-        self.help_scroll = 0;
+        self.popup_scroll = 0;
         self.popup = Some(Popup::Help);
     }
 
@@ -860,6 +916,7 @@ impl App {
                 sandbox,
                 error,
             } => return self.update_rule(target, allowed, sandbox, error, key),
+            Popup::Settings(form) => return self.update_settings(form, key),
             _ if key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -867,6 +924,7 @@ impl App {
                 self.popup = Some(popup);
             }
             Popup::Help => self.update_help(key.code),
+            Popup::Info { name } => self.update_info(name, key.code),
             Popup::ConfirmRemove { name } => match key.code {
                 KeyCode::Char('y') => return Some(Action::Remove { name }),
                 KeyCode::Esc | KeyCode::Char('n') => {}
@@ -893,14 +951,73 @@ impl App {
         match code {
             KeyCode::Esc | KeyCode::Char('?' | 'q') => return,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.help_scroll = self.help_scroll.saturating_sub(1);
+                self.popup_scroll = self.popup_scroll.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.help_scroll = step_index(self.help_scroll, true, self.help_scroll_limit);
+                self.popup_scroll = step_index(self.popup_scroll, true, self.popup_scroll_limit);
             }
             _ => {}
         }
         self.popup = Some(Popup::Help);
+    }
+
+    fn update_info(&mut self, name: String, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('i' | 'q') => return,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.popup_scroll = self.popup_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.popup_scroll = step_index(self.popup_scroll, true, self.popup_scroll_limit);
+            }
+            _ => {}
+        }
+        self.popup = Some(Popup::Info { name });
+    }
+
+    /// Ports are checked with the parser `msbx policy host-ports` uses; a bad list keeps the form.
+    fn update_settings(&mut self, mut form: SettingsForm, key: KeyEvent) -> Option<Action> {
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc if plain => return None,
+            KeyCode::Tab | KeyCode::BackTab if plain => {
+                form.field = match form.field {
+                    SettingsField::Preset => SettingsField::HostPorts,
+                    SettingsField::HostPorts => SettingsField::Preset,
+                };
+            }
+            KeyCode::Enter if plain => match policy::parse_host_ports(form.host_ports.text()) {
+                Ok(host_ports) => {
+                    return Some(Action::SaveSettings {
+                        preset: Preset::ALL
+                            .get(form.preset)
+                            .copied()
+                            .unwrap_or(Preset::Balanced),
+                        host_ports,
+                    });
+                }
+                Err(error) => {
+                    form.error = Some(format!("{error:#}"));
+                    form.field = SettingsField::HostPorts;
+                }
+            },
+            _ if form.field == SettingsField::HostPorts => {
+                if form.host_ports.update(key) {
+                    form.error = None;
+                }
+            }
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') if plain => {
+                form.preset = form.preset.saturating_sub(1);
+            }
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('l' | 'j') if plain => {
+                form.preset = (form.preset + 1).min(Preset::ALL.len() - 1);
+            }
+            _ => {}
+        }
+        self.popup = Some(Popup::Settings(form));
+        None
     }
 
     fn update_preset(
@@ -1154,13 +1271,19 @@ mod tests {
             agent: Some("codex".to_owned()),
             project: None,
             image: None,
+            created: None,
             vcpus: None,
             cpu_percent: None,
             memory_bytes: None,
             memory_limit_bytes: None,
+            disk_used_bytes: None,
+            disk_free_bytes: None,
             uptime: None,
             network: None,
             proxied: true,
+            host_ports: None,
+            user: None,
+            restricted: None,
             git_guarded: true,
             rx_bytes: None,
             tx_bytes: None,
@@ -1922,6 +2045,168 @@ mod tests {
         );
         assert_eq!(app.logs, Vec::<String>::new());
         assert_eq!(app.detail_scroll, 0);
+    }
+
+    fn ctrl(app: &mut App, letter: char) -> Option<Action> {
+        app.update(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::CONTROL))
+    }
+
+    fn settings(app: &App) -> Option<&SettingsForm> {
+        match &app.popup {
+            Some(Popup::Settings(form)) => Some(form),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn i_opens_info_for_the_selected_card_and_closes_with_esc_i_or_q() {
+        let mut app = app();
+        app.select_named("b");
+        for close in [KeyCode::Esc, KeyCode::Char('i'), KeyCode::Char('q')] {
+            assert_eq!(press(&mut app, KeyCode::Char('i')), None);
+            assert_eq!(app.popup, Some(Popup::Info { name: name("b") }));
+            assert_eq!(press(&mut app, close), None, "closing never quits");
+            assert_eq!(app.popup, None);
+        }
+        app.focus = Focus::Detail;
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(
+            app.popup,
+            Some(Popup::Info { name: name("b") }),
+            "the selected card's info opens from the detail pane too"
+        );
+    }
+
+    #[test]
+    fn info_scrolls_within_the_measured_limit_and_owns_its_keys() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('i'));
+        app.set_popup_scroll_limit(3);
+        for _ in 0..5 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.popup_scroll, 3);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.popup_scroll, 2, "one step back from the bottom");
+        assert_eq!(
+            press(&mut app, KeyCode::Char('x')),
+            None,
+            "no shell from info"
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('s')),
+            None,
+            "no stop from info"
+        );
+        assert_eq!(app.popup, Some(Popup::Info { name: name("a") }));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.popup_scroll, 0, "reopening starts at the top");
+    }
+
+    #[test]
+    fn info_needs_a_sandbox_card_and_the_split_view() {
+        let mut app = app();
+        app.selected = app.sandboxes.len();
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.popup, None, "+ new sandbox has no info");
+        app.selected = 0;
+        press(&mut app, KeyCode::Char('n'));
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(
+            app.popup, None,
+            "the full network view has no selected card"
+        );
+    }
+
+    #[test]
+    fn ctrl_s_opens_settings_with_the_current_preset_and_ports() {
+        let mut app = app();
+        app.set_network(Some(Preset::LockedDown), Vec::new());
+        app.host_ports = Some(vec![1234, 8080]);
+        assert_eq!(ctrl(&mut app, 's'), None);
+        let form = settings(&app).cloned();
+        assert_eq!(form.as_ref().map(|form| form.preset), Some(2));
+        assert_eq!(
+            form.as_ref().map(|form| form.host_ports.text().to_owned()),
+            Some(name("1234, 8080"))
+        );
+        assert_eq!(form.map(|form| form.field), Some(SettingsField::Preset));
+        press(&mut app, KeyCode::Right);
+        assert_eq!(settings(&app).map(|form| form.preset), Some(2), "clamps");
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(settings(&app).map(|form| form.preset), Some(1));
+        assert_eq!(
+            press(&mut app, KeyCode::Char('q')),
+            None,
+            "q does not quit a form"
+        );
+        assert!(settings(&app).is_some());
+    }
+
+    #[test]
+    fn settings_validate_ports_inline_and_save_both_fields() {
+        let mut app = app();
+        ctrl(&mut app, 's');
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(
+            settings(&app).map(|form| form.field),
+            Some(SettingsField::HostPorts)
+        );
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(press(&mut app, KeyCode::Enter), None);
+        let error = settings(&app).and_then(|form| form.error.clone());
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|error| error.contains("\"11434x\"")),
+            "{error:?}"
+        );
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(
+            settings(&app).and_then(|form| form.error.clone()),
+            None,
+            "editing clears the error"
+        );
+        ctrl(&mut app, 'u');
+        app.update_paste("8080 9000");
+        press(&mut app, KeyCode::BackTab);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::SaveSettings {
+                preset: Preset::LockedDown,
+                host_ports: vec![8080, 9000],
+            })
+        );
+        assert_eq!(app.popup, None);
+    }
+
+    #[test]
+    fn settings_without_a_policy_start_from_the_defaults_and_esc_cancels() {
+        let mut app = app();
+        app.set_network(None, Vec::new());
+        app.host_ports = None;
+        ctrl(&mut app, 's');
+        let form = settings(&app).cloned();
+        assert_eq!(form.as_ref().map(|form| form.preset), Some(1));
+        assert_eq!(
+            form.map(|form| form.host_ports.text().to_owned()),
+            Some(name("1234, 11434"))
+        );
+        press(&mut app, KeyCode::Tab);
+        ctrl(&mut app, 'u');
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            Some(Action::SaveSettings {
+                preset: Preset::Balanced,
+                host_ports: Vec::new(),
+            }),
+            "an empty list is valid: no Mac ports"
+        );
+        ctrl(&mut app, 's');
+        assert_eq!(press(&mut app, KeyCode::Esc), None);
+        assert_eq!(app.popup, None);
     }
 
     #[test]

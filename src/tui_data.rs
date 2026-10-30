@@ -15,6 +15,8 @@ use crate::sandbox;
 
 pub(crate) struct NetworkData {
     pub(crate) preset: Option<Preset>,
+    /// The host ports new sandboxes get; `None` without a policy file.
+    pub(crate) host_ports: Option<Vec<u16>>,
     pub(crate) entries: Vec<NetEntry>,
     pub(crate) rules: Vec<RuleInfo>,
 }
@@ -24,6 +26,7 @@ pub(crate) fn read_network(dirs: &Dirs) -> Result<NetworkData> {
     let log = Log::load(&dirs.network_log())?;
     Ok(NetworkData {
         preset: policy.as_ref().map(|policy| policy.preset),
+        host_ports: policy.as_ref().map(|policy| policy.host_ports.clone()),
         entries: aggregate_network(log.entries()),
         rules: policy.as_ref().map_or_else(Vec::new, rule_rows),
     })
