@@ -51,6 +51,11 @@ impl Dirs {
         self.config.join("policy.toml")
     }
 
+    /// Image, resources and agent arguments (RFC 0002, the subset in RFC 0012).
+    pub(crate) fn config_file(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+
     pub(crate) fn token_file(&self) -> PathBuf {
         self.state.join("proxy-token")
     }
@@ -130,6 +135,10 @@ mod tests {
         assert_eq!(
             dirs.policy_file(),
             PathBuf::from("/home/dev/.config/msbx/policy.toml")
+        );
+        assert_eq!(
+            dirs.config_file(),
+            PathBuf::from("/home/dev/.config/msbx/config.toml")
         );
         assert_eq!(
             dirs.token_file(),

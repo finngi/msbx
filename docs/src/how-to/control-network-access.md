@@ -97,8 +97,9 @@ them. The Network tab says so. Recreate them with `msb rm -f NAME` and `msbx age
 ## What the policy does not cover
 
 - DNS: the sandbox can resolve any name.
-- Services on your Mac (`host.microsandbox.internal`): only Ollama (11434) and LM Studio (1234)
-  are reachable, fixed when the sandbox is created.
+- Services on your Mac (`host.microsandbox.internal`): only the host ports, by default Ollama
+  (11434) and LM Studio (1234), fixed when the sandbox is created. Change them for new
+  sandboxes with `msbx policy host-ports` or `Ctrl-S` in the dashboard.
 - Traffic that carries no host name (plain TCP) is decided by IP alone.
 
 See the [security model](../explanation/security-model.md).

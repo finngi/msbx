@@ -18,19 +18,20 @@ msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a sin
 
 ## Features
 
-- `msbx agent` starts a coding agent (Codex, pi) or a shell in a sandbox for the current project. The sandbox is created the first time and reused after that.
+- `msbx agent` starts a coding agent or a shell in a sandbox for the current project: the same agents as Docker Sandboxes (Claude Code, Codex, Copilot, Cursor, Devin, Docker Agent, Droid, Gemini, Kiro, OpenCode) plus pi. Each is installed inside the VM from its vendor's own npm package or installer, and starts with its permission prompts off, as in Docker Sandboxes. The sandbox is created the first time and reused after that.
 - `msbx` opens a terminal dashboard of all microsandbox sandboxes, including ones msbx did not create, with live CPU and memory, Overview, Logs, Network and Rules tabs.
 - Network policy like Docker Sandboxes: `open`, `balanced` or `locked-down`, plus allow and deny rules per host (`example.com`, `*.example.com`, `**.example.com`, ports, CIDRs), global or per sandbox. Every sandbox's traffic goes through a small msbx proxy, so rule changes apply at once and a log shows what was allowed and blocked.
 - `msbx ls`, `msbx logs NAME`, `msbx run IMAGE` and any other command run `msb` with the same arguments.
-- `msbx secret set OPENAI_API_KEY` keeps the key in the macOS Keychain, so you need not export it in every shell.
-- Sign in to Codex or pi once: the sign-in file lives on a per-agent volume shared by all sandboxes of that agent.
+- `msbx secret set ANTHROPIC_API_KEY` keeps a key in the macOS Keychain, or on Linux in the Secret Service, so you need not export it in every shell.
+- Sign in to an agent once: its sign-in files live on a per-agent volume shared by all sandboxes of that agent.
 - pi sees the local model servers on your Mac (Ollama, LM Studio) with no setup.
+- An optional `~/.config/msbx/config.toml` sets the image, CPUs and memory, and per agent the image, extra arguments or keeping its permission prompts.
 - Sandbox defaults:
   - the project folder is mounted at the same path as on the host
-  - all host CPUs, with a 32 GiB memory limit
-  - outbound traffic through the msbx proxy under your policy, plus Ollama and LM Studio on the host (`host.microsandbox.internal:11434` and `:1234`)
+  - all host CPUs, and half the host's memory (at least 512 MiB, at most 32 GiB)
+  - outbound traffic through the msbx proxy under your policy, plus chosen ports on your Mac (`host.microsandbox.internal`; by default 11434 for Ollama and 1234 for LM Studio)
   - agent API keys stay on the host: the VM sees only a placeholder, and microsandbox's secret proxy substitutes the real key on the way out
-  - `node:24-bookworm-slim` image, with the agent installed once at creation
+  - `node:24-bookworm` image (Node.js 24, git, curl, Python 3, gcc, make), with the agent installed once at creation; another Debian or Ubuntu image works too
 
 ## Requirements
 
@@ -54,41 +55,60 @@ cargo install --git https://github.com/finngi/msbx
 ### Run an agent
 
 ```sh
-msbx agent <codex|pi|shell> [PATH] [-- ARGS]
+msbx agent <AGENT> [PATH] [-- ARGS]
 ```
 
 - `PATH` defaults to the current directory.
 - The sandbox is named `<agent>-<folder>`, for example `codex-myapp`.
 - If the sandbox exists it is started if needed and reused; otherwise it is created.
-- Arguments after `--` are passed to the agent.
+- Arguments after `--` go to the agent, as in `sbx run`. When the first starts with `-` they follow the agent's defaults (such as the skip-prompts flag); when it is a word such as a subcommand, the defaults are dropped.
 
 ```sh
-msbx agent codex                # Codex in the current project
-msbx agent pi ~/dev/myapp       # pi in another project
-msbx agent shell                # bash in the project sandbox
-msbx agent codex -- --version   # pass arguments through to the agent
+msbx agent claude                          # Claude Code in the current project
+msbx agent pi ~/dev/myapp                  # pi in another project
+msbx agent shell                           # bash in the project sandbox
+msbx agent claude -- -c                    # claude --dangerously-skip-permissions -c
+msbx agent codex -- login --device-auth    # codex login --device-auth
 ```
 
-| Agent | Command in the VM | Host-side secret | Shared sign-in |
-|---|---|---|---|
-| `codex` | `codex` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `~/.codex/auth.json` |
-| `pi` | `pi` | none (uses local models on the host) | `~/.pi/agent/auth.json` |
-| `shell` | `bash` | none | none |
+| Agent | Runs | Skip-prompts flag | Host-side keys (any one) | Shared sign-in |
+|---|---|---|---|---|
+| `claude` | `claude` | `--dangerously-skip-permissions` | `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` | `~/.claude/.credentials.json`, `~/.claude.json` |
+| `codex` | `codex` | `--dangerously-bypass-approvals-and-sandbox` | `OPENAI_API_KEY` | `~/.codex/auth.json` |
+| `copilot` | `copilot` | `--yolo` | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` | `~/.copilot/config.json` |
+| `cursor` | `cursor-agent` | `--yolo` | `CURSOR_API_KEY` | `~/.config/cursor/auth.json` |
+| `devin` | `devin` | `--permission-mode dangerous` | none | `~/.local/share/devin/credentials.toml` |
+| `docker-agent` | `docker-agent run` | `--yolo` | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY` | none |
+| `droid` | `droid` | `--auto high` | `FACTORY_API_KEY` | `~/.factory/auth.v2.file`, `auth.v2.key` |
+| `gemini` | `gemini` | `--approval-mode=yolo` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` | `~/.gemini/oauth_creds.json` |
+| `kiro` | `kiro-cli chat` | `--trust-all-tools` | none | none (sign in per sandbox) |
+| `opencode` | `opencode` | `--auto` | `OPENCODE_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` | `~/.local/share/opencode/auth.json` |
+| `pi` | `pi` | none | none (uses local models on the host) | `~/.pi/agent/auth.json` |
+| `shell` | `bash` | none | none | none |
+
+Keys are sent only to their vendor's API hosts. Versions, install sources and hosts are on the [Agents](https://finngi.github.io/msbx/reference/agents.html) page. To keep an agent's own permission prompts, or add arguments to every launch:
+
+```toml
+# ~/.config/msbx/config.toml
+[agents.claude]
+auto_approve = false
+args = ["--model", "opus"]
+```
 
 Sandbox settings are applied only when the sandbox is created. To change them, remove it with `msb rm -f <name>` and run `msbx agent` again.
 
-### Keep an API key in the Keychain
+### Keep an API key in the key store
 
 ```sh
-msbx secret set OPENAI_API_KEY   # security prompts for the value
+msbx secret set OPENAI_API_KEY   # security (or secret-tool) prompts for the value
 msbx secret rm OPENAI_API_KEY
 ```
 
-On macOS, msbx reads each agent secret that is not set in your shell from the Keychain before it touches a sandbox. A variable exported in the shell wins. The value goes only into msbx's own environment, where microsandbox's secret proxy reads it; it is never printed or passed on a command line.
+msbx reads each agent secret that is not set in your shell from the macOS Keychain, or on Linux from the freedesktop Secret Service through `secret-tool` (package `libsecret-tools`), before it touches a sandbox. A variable exported in the shell wins. The value goes only into msbx's own environment, where microsandbox's secret proxy reads it; it is never printed or passed on a command line.
 
 ### Sign in once
 
-Codex "Sign in with ChatGPT" and pi logins are kept on a named volume per agent, `msbx-login-codex` or `msbx-login-pi`, mounted at `~/.msbx-login` (the agent user's home, `/home/node`) in every sandbox of that agent. The sign-in file in the VM is a link to that volume, so a login or token refresh in one sandbox is seen by all of them, and it survives `msb rm`.
+Agent sign-ins (Codex "Sign in with ChatGPT", Claude Code `/login`, pi `/login` and the others in the table) are kept on a named volume per agent, such as `msbx-login-codex`, mounted at `/home/node/.msbx-login` in every sandbox of that agent. The sign-in file in the VM is a link to that volume, so a login or token refresh in one sandbox is seen by all of them, and it survives `msb rm`.
 
 - Codex: `msbx agent codex -- login --device-auth`, then `msbx agent codex` in any project.
 - pi: run `msbx agent pi`, then `/login`.
@@ -102,7 +122,7 @@ Each time `msbx agent pi` starts, msbx writes `~/.pi/agent/models.json` in the V
 
 ### Control network access
 
-The first `msbx agent` asks for a preset; `msbx policy init <open|balanced|locked-down>` does the same in a script. `balanced` blocks by default and allows the agents' API hosts, Codex sign-in, npm, Debian, PyPI, crates.io, Go and GitHub.
+The first `msbx agent` asks for a preset; `msbx policy init <open|balanced|locked-down>` does the same in a script. `balanced` blocks by default and allows the agents' API hosts, installers and sign-ins, npm, Node.js, Debian, PyPI, crates.io, Go and GitHub.
 
 ```sh
 msbx policy allow pypi.org,files.pythonhosted.org      # everywhere
@@ -110,10 +130,14 @@ msbx policy deny "**.example.com" --sandbox codex-api  # one sandbox; deny beats
 msbx policy check pypi.org:443                         # Allowed or Blocked, exit 1 when blocked
 msbx policy log codex-api --blocked                    # what the proxy refused
 msbx policy ls                                         # effective rules and their source
+msbx policy host-ports 11434 1234 8080                 # Mac ports new sandboxes may reach
 msbx proxy status                                      # the proxy on 127.0.0.1:47447
 ```
 
-Rules live in `~/.config/msbx/policy.toml` and apply to the next connection; nothing restarts. The proxy starts itself when msbx needs it and keeps running after msbx exits, like the sandboxes. Use `msbx start NAME` (not `msb start`) for proxied sandboxes: msbx hands `msb` the proxy token. See [Control network access](https://finngi.github.io/msbx/how-to/control-network-access.html).
+Rules live in `~/.config/msbx/policy.toml` and apply to the next connection; nothing restarts.
+Host ports are different: traffic to your Mac never passes the proxy, so they are fixed when a
+sandbox is created. `msbx policy host-ports` (or `Ctrl-S` in the dashboard) changes them for new
+sandboxes and names the existing ones to recreate. The proxy starts itself when msbx needs it and keeps running after msbx exits, like the sandboxes. Use `msbx start NAME` (not `msb start`) for proxied sandboxes: msbx hands `msb` the proxy token. See [Control network access](https://finngi.github.io/msbx/how-to/control-network-access.html).
 
 ### Dashboard
 
@@ -136,6 +160,8 @@ The title marker shows which pane has focus. On narrow terminals, that pane fill
 | `a`, `A`, `b` | Network: allow here, allow everywhere, block here |
 | `a`, `r` | Rules: add a rule, remove an explicit rule (confirm) |
 | `p` | Choose the network preset |
+| `i` | Info for the selected sandbox: identity, resources, security, network, mounts |
+| `Ctrl-S` | Settings: default preset and host ports for new sandboxes |
 | `?` / `Ctrl-H` | Help for the current view |
 | `q` / `Ctrl-C` | Quit |
 
@@ -173,13 +199,15 @@ What microsandbox isolates:
 - Only the project folder is mounted from the host filesystem.
 - API keys stay on the host. The VM sees a placeholder, which microsandbox replaces with the real key only on requests to the allowed host.
 
-What msbx adds for git ([RFC 0001](https://finngi.github.io/msbx/rfcs/0001-git-safety.html)): the agent runs as the unprivileged `node` user under microsandbox's `restricted` profile, `.git/hooks`, `.git/info` and `.git/config` are read-only mounts the agent cannot unmount (even as root), msbx only runs git on your Mac with hooks and fsmonitor off, and it warns when the files git executes from changed during or between sessions. Sandboxes created before this keep running as root; recreate them. See [Keep git safe](https://finngi.github.io/msbx/how-to/guard-git.html).
+Agents start with their permission prompts off (`claude --dangerously-skip-permissions` and the like), as in Docker Sandboxes: the VM, the network policy, the git guard and host-side keys are the boundary. Set `auto_approve = false` for an agent in `config.toml` to keep its prompts too.
+
+What msbx adds for git ([RFC 0001](https://finngi.github.io/msbx/rfcs/0001-git-safety.html)): the agent runs as the unprivileged uid 1000 (`node`) under microsandbox's `restricted` profile, `.git/hooks`, `.git/info` and `.git/config` are read-only mounts the agent cannot unmount (even as root), msbx only runs git on your Mac with hooks and fsmonitor off, and it warns when the files git executes from changed during or between sessions. Sandboxes created before this keep running as root; recreate them. See [Keep git safe](https://finngi.github.io/msbx/how-to/guard-git.html).
 
 What it leaves open:
 
 - The project folder is writable from the VM. An agent can modify or delete anything in it, including the history under `.git`. Commit or back up first.
 - Network access follows your policy. The proxy decides by the host name in the TLS handshake or HTTP `Host` header, checked against DNS on your machine; traffic with no name is decided by IP. DNS itself is unrestricted, and an allowed host can still receive project contents.
-- Host services at `host.microsandbox.internal`: only ports 11434 (Ollama) and 1234 (LM Studio), fixed when the sandbox is created.
+- Host services at `host.microsandbox.internal`: only the host ports in `policy.toml` (by default 11434 for Ollama and 1234 for LM Studio), fixed when the sandbox is created. Any port you add exposes that Mac service to every sandbox created afterwards.
 - TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
 - Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox configuration (readable only by your user account).
 
@@ -193,7 +221,8 @@ msbx keeps no list of `msb` commands. It hands anything it does not define to wh
 
 ## Limitations and roadmap
 
-- Three built-in agents (`codex`, `pi`, `shell`); no config file or custom images.
+- Twelve built-in agents, no custom agents. `config.toml` covers the image, resources and agent arguments only; the rest of [RFC 0002](https://finngi.github.io/msbx/rfcs/0002-config.html) (per-project settings, login scope, setup scripts) is not built yet.
+- Only pi is set up for local models; other agents need their base URL set by hand.
 - Sandbox settings other than the network policy are fixed at creation.
 - Host access cannot change while a sandbox runs; host traffic never passes the proxy.
 - Later: propose a `msb tui` command or external-subcommand support upstream, so msbx can become part of `msb`.

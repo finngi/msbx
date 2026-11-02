@@ -6,7 +6,7 @@ is reachable.
 
 ## pi: no setup needed
 
-Each time `msbx agent pi` starts, msbx writes `/root/.pi/agent/models.json` in the VM:
+Each time `msbx agent pi` starts, msbx writes `~/.pi/agent/models.json` in the VM:
 
 1. If you have `~/.pi/agent/models.json` on the host (or `$PI_CODING_AGENT_DIR/models.json`),
    msbx copies the providers whose `baseUrl` host is `127.0.0.1`, `localhost`, `[::1]` or
@@ -44,12 +44,27 @@ run `msbx agent pi` again after starting it.
 
 3. Use `http://host.microsandbox.internal:1234/v1` as the agent's OpenAI-compatible base URL.
 
+## Other agents
+
+msbx sets up only pi for local models so far. Several other agents can use the same servers
+once you point them at `host.microsandbox.internal`, for example (check each vendor's docs):
+
+- Claude Code: `ANTHROPIC_BASE_URL=http://host.microsandbox.internal:11434` for Ollama
+  ([Ollama's guide](https://docs.ollama.com/integrations/claude-code)) or port 1234 for LM
+  Studio ([LM Studio's guide](https://lmstudio.ai/docs/integrations/claude-code)), set in the
+  `env` block of `~/.claude/settings.json` inside the Claude sandbox.
+- Codex: `codex --oss` with Ollama ([Ollama's guide](https://docs.ollama.com/integrations/codex)).
+- OpenCode: an OpenAI-compatible provider in its config
+  ([providers](https://opencode.ai/docs/providers/)).
+
 ## If it does not connect
 
-- The sandbox must be allowed to reach the host port. Sandboxes created by msbx may reach ports
-  11434 and 1234 on the host and nothing else there; a server on another port needs a sandbox
-  created with that port, which msbx does not offer yet. Sandboxes created before the network
-  policy existed have the whole `host` profile (`network  public + host` on the Overview tab).
+- The sandbox must be allowed to reach the host port. Sandboxes created by msbx may reach the
+  host ports in `policy.toml` (by default 11434 and 1234) and nothing else there. For a server
+  on another port, add it with `msbx policy host-ports 11434 1234 8080` (or `Ctrl-S` in the
+  dashboard), then recreate the sandbox: `i` on its card shows the ports it was created with.
+  Sandboxes created before the network policy existed have the whole `host` profile
+  (`network  public + host` on the Overview tab).
 - `localhost` inside the VM is the VM itself. Use `host.microsandbox.internal` to reach your Mac.
 
 Host access is fixed when the sandbox is created; the network policy does not change it. See

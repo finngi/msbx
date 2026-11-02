@@ -38,7 +38,7 @@ Implementation plan (written before production edits):
 9. Snapshots: each new screen populated/empty where meaningful at 100x30, 80x24 and 60x20; style and long-content checks; read every pending file.
 10. Verify: rust-expert gate, tics, mdbook and isolated PTY captures of every changed screen and resize/escape/exit.
 11. Dependencies/features: none; use current ratatui/crossterm/serde/tokio/insta and Python pyte driver.
-12. Exclusions: VM boot, mouse, settings, cloud/local choice, filesystem rules, extra Info popup, user keymap configuration, commits/pushes.
+12. Exclusions: VM boot, mouse, settings, cloud/local choice, filesystem rules, extra Info popup, user keymap configuration, commits/pushes. [RFC 0011](0011-info-settings.md) later added settings and the Info popup.
 
 Name validation accepts the same canonical lowercase ASCII letters, digits and single interior hyphens as generated names, with a 128-byte limit. A shared pure validator is called by the wizard and sandbox boundary. This intentionally keeps the narrower msbx naming convention even though microsandbox accepts dots, underscores and uppercase too. The dashboard rejects listed existing names and calls the SDK's atomic `create()` operation, so concurrent creators cannot attach to a winner with different settings. The CLI retains `connect_or_create` and verifies both project and agent labels before reuse. SDK source checked: `microsandbox-0.7.11/lib/sandbox/builder.rs:1669` preserves existing configuration on `connect_or_create`; `microsandbox-types-0.7.11/lib/validation.rs:20` defines the outer name limits.
 
@@ -64,7 +64,7 @@ Use brackets for tabs, following [lazygit's separate pane and tab bindings](http
 
 Keep the [Ratatui TEA split](https://ratatui.rs/concepts/application-patterns/the-elm-architecture/) and its existing concrete functions. Help and footer share binding data, following [gitui's common commands](https://github.com/gitui-org/gitui/blob/d7214eccb3cac52ce3f8d9ca18f218671821eeee/src/app.rs#L661-L666) and [television's input map](https://github.com/alexpasmantier/television/blob/67ddd3046f125cb8229af3de70c5b1e89af0a694/television/keymap.rs#L12-L90). Keep an explicit named-create entry point so CLI defaults remain unchanged.
 
-Skip `i`: Overview already contains status, uptime, CPU, memory, network policy, traffic, secrets, mounts and image. Add identity/path there if needed.
+Skip `i`: Overview already contains status, uptime, CPU, memory, network policy, traffic, secrets, mounts and image. Add identity/path there if needed. (Revisited in [RFC 0011](0011-info-settings.md), once host ports made the create-time network settings worth showing.)
 
 ## Prior art
 

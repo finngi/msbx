@@ -17,14 +17,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents;
 
-/// Hosts the `balanced` preset allows besides each agent's secret host (`agents.rs`): Codex
-/// sign-in and `ChatGPT` mode (Codex 0.148.0 `login/src/server.rs` `DEFAULT_ISSUER`,
-/// `model-provider-info/src/lib.rs` `CHATGPT_CODEX_BASE_URL`, `http-client/src/chatgpt_hosts.rs`),
-/// then the package sources the install scripts and common toolchains use, and GitHub.
-pub(crate) const BALANCED_BASELINE: [&str; 18] = [
+/// Hosts the `balanced` preset allows besides each agent's secret hosts (`agents.rs`): what the
+/// agents' installs and sign-ins reach (RFC 0012 lists the source for each), then the package
+/// sources common toolchains use, and GitHub.
+pub(crate) const BALANCED_BASELINE: [&str; 38] = [
+    // Codex sign-in and ChatGPT mode (Codex 0.148.0 `login/src/server.rs` `DEFAULT_ISSUER`,
+    // `model-provider-info/src/lib.rs` `CHATGPT_CODEX_BASE_URL`).
     "auth.openai.com",
     "chatgpt.com",
     "**.chatgpt.com",
+    // Claude Code sign-in (https://code.claude.com/docs/en/network-config).
+    "claude.ai",
+    "platform.claude.com",
+    "console.anthropic.com",
+    // Gemini CLI's Google sign-in: Google OAuth and the Code Assist API it then calls.
+    "accounts.google.com",
+    "oauth2.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+    // Copilot's API for every plan, and GitHub device sign-in (github.com below).
+    "**.githubcopilot.com",
+    // Cursor's installer, download and API hosts (https://cursor.com/install).
+    "cursor.com",
+    "downloads.cursor.com",
+    "**.cursor.sh",
+    // Devin's installer, downloads and sign-in (cli.devin.ai/install.sh, the devin binary).
+    "cli.devin.ai",
+    "static.devin.ai",
+    "app.devin.ai",
+    "api.devin.ai",
+    // Kiro's installer and downloads (https://cli.kiro.dev/install); its sign-in hosts are not
+    // documented, see `msbx policy log`.
+    "cli.kiro.dev",
+    "prod.download.cli.kiro.dev",
+    // Droid sign-in (WorkOS hosts in the droid 1.0.0 binary).
+    "api.workos.com",
+    "auth.workos.com",
+    // OpenCode's model list.
+    "models.dev",
+    // Node.js for images without npm.
+    "nodejs.org",
     "registry.npmjs.org",
     "deb.debian.org",
     "security.debian.org",
@@ -402,11 +433,27 @@ impl Rules {
     }
 }
 
+/// Ports on the Mac (`host.microsandbox.internal`) a new sandbox may reach when `policy.toml`
+/// does not say: Ollama (11434) and LM Studio (1234). Sorted, as [`normalize_host_ports`] keeps
+/// every list.
+pub(crate) const DEFAULT_HOST_PORTS: [u16; 2] = [1234, 11434];
+
+/// More host ports than this is almost certainly a mistake (a pasted range, say).
+const MAX_HOST_PORTS: usize = 32;
+
 /// The contents of `policy.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Policy {
     pub(crate) preset: Preset,
+    /// Mac ports new sandboxes may reach directly. Host traffic never passes the proxy, so these
+    /// are written into each sandbox's static policy at create and cannot change afterwards.
+    #[serde(
+        default = "default_host_ports",
+        deserialize_with = "deserialize_host_ports",
+        skip_serializing_if = "is_default_host_ports"
+    )]
+    pub(crate) host_ports: Vec<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) allow: Vec<Target>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -418,17 +465,25 @@ pub(crate) struct Policy {
 static BASELINE: LazyLock<Vec<Target>> = LazyLock::new(|| {
     // The table is a constant checked by `baseline_targets_parse`, so a bad entry cannot
     // reach a user without failing the tests.
-    agents::secret_hosts()
+    let mut targets: Vec<Target> = Vec::new();
+    for target in agents::secret_hosts()
         .into_iter()
         .chain(BALANCED_BASELINE)
         .filter_map(|host| Target::parse(host).ok())
-        .collect()
+    {
+        // A secret host may also be an install or sign-in host; list each rule once.
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
 });
 
 impl Policy {
     pub(crate) fn new(preset: Preset) -> Self {
         Self {
             preset,
+            host_ports: default_host_ports(),
             allow: Vec::new(),
             deny: Vec::new(),
             sandboxes: BTreeMap::new(),
@@ -567,6 +622,66 @@ pub(crate) fn parse_targets(text: &str) -> Result<Vec<Target>> {
         .collect::<Result<_>>()?;
     ensure!(!targets.is_empty(), "no rule target given");
     Ok(targets)
+}
+
+fn default_host_ports() -> Vec<u16> {
+    DEFAULT_HOST_PORTS.to_vec()
+}
+
+fn is_default_host_ports(ports: &[u16]) -> bool {
+    ports == DEFAULT_HOST_PORTS
+}
+
+fn deserialize_host_ports<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<u16>, D::Error> {
+    normalize_host_ports(Vec::<u16>::deserialize(deserializer)?)
+        .map_err(|error| serde::de::Error::custom(format!("host_ports: {error}")))
+}
+
+/// Sorted and deduplicated; rejects port 0 and more than [`MAX_HOST_PORTS`]. Empty is allowed:
+/// no Mac access except DNS.
+pub(crate) fn normalize_host_ports(mut ports: Vec<u16>) -> Result<Vec<u16>> {
+    ensure!(
+        !ports.contains(&0),
+        "host ports must be numbers from 1 to 65535"
+    );
+    ports.sort_unstable();
+    ports.dedup();
+    ensure!(
+        ports.len() <= MAX_HOST_PORTS,
+        "at most {MAX_HOST_PORTS} host ports are allowed, got {}",
+        ports.len()
+    );
+    Ok(ports)
+}
+
+/// Parses host ports separated by commas or spaces, as `msbx policy host-ports` and the
+/// dashboard's settings take them. Blank text means no ports.
+pub(crate) fn parse_host_ports(text: &str) -> Result<Vec<u16>> {
+    let ports = text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            part.parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .with_context(|| format!("invalid host port {part:?}: use numbers from 1 to 65535"))
+        })
+        .collect::<Result<Vec<u16>>>()?;
+    normalize_host_ports(ports)
+}
+
+/// `1234, 11434`, or `none`.
+pub(crate) fn port_list(ports: &[u16]) -> String {
+    if ports.is_empty() {
+        return "none".to_owned();
+    }
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The policy file, or `None` when it does not exist yet ("not initialised").
@@ -844,9 +959,21 @@ mod tests {
         {
             target(host);
         }
+        let mut unique: Vec<&str> = BALANCED_BASELINE
+            .iter()
+            .copied()
+            .chain(agents::secret_hosts())
+            .collect();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(BASELINE.len(), unique.len(), "every host once");
+        let mut baseline = BALANCED_BASELINE.to_vec();
+        baseline.sort_unstable();
+        baseline.dedup();
         assert_eq!(
-            BASELINE.len(),
-            BALANCED_BASELINE.len() + agents::secret_hosts().len()
+            baseline.len(),
+            BALANCED_BASELINE.len(),
+            "no repeats in the table"
         );
     }
 
@@ -869,7 +996,7 @@ mod tests {
                 "allow *.allowed.test (global)",
             ]
         );
-        assert_eq!(listed[6], "allow api.openai.com (preset)");
+        assert_eq!(listed[6], "allow api.anthropic.com (preset)");
         assert_eq!(policy.rules(None).len(), 4 + BASELINE.len());
         assert_eq!(sample(Preset::LockedDown).rules(None).len(), 4);
     }
@@ -940,6 +1067,82 @@ mod tests {
             Policy::from_toml("preset = \"open\"")?,
             Policy::new(Preset::Open)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn host_ports_default_to_the_model_servers_and_round_trip() -> Result<()> {
+        let missing = Policy::from_toml("preset = \"open\"")?;
+        assert_eq!(
+            missing.host_ports,
+            [1234, 11434],
+            "older files keep today's ports"
+        );
+        assert_eq!(
+            Policy::new(Preset::Open).to_toml()?,
+            "preset = \"open\"\n",
+            "the default is not written"
+        );
+        let mut policy = Policy::new(Preset::Balanced);
+        policy.host_ports = vec![8080];
+        let text = policy.to_toml()?;
+        assert!(text.contains("host_ports = [8080]"), "{text}");
+        assert_eq!(Policy::from_toml(&text)?, policy);
+        policy.host_ports.clear();
+        let text = policy.to_toml()?;
+        assert!(text.contains("host_ports = []"), "{text}");
+        assert_eq!(Policy::from_toml(&text)?.host_ports, [] as [u16; 0]);
+        Ok(())
+    }
+
+    #[test]
+    fn host_ports_are_validated_on_load() -> Result<()> {
+        let tidy = Policy::from_toml("preset = \"open\"\nhost_ports = [11434, 1234, 1234]")?;
+        assert_eq!(tidy.host_ports, [1234, 11434], "deduplicated and sorted");
+        for (text, fragment) in [
+            ("host_ports = [0]", "1 to 65535"),
+            ("host_ports = [70000]", "host_ports"),
+            ("host_ports = [\"8080\"]", "host_ports"),
+        ] {
+            let error = Policy::from_toml(&format!("preset = \"open\"\n{text}"))
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default();
+            assert!(error.contains(fragment), "{text}: {error}");
+        }
+        let many: Vec<String> = (1..=33).map(|port| port.to_string()).collect();
+        let error = Policy::from_toml(&format!(
+            "preset = \"open\"\nhost_ports = [{}]",
+            many.join(", ")
+        ))
+        .err()
+        .map(|e| format!("{e:#}"))
+        .unwrap_or_default();
+        assert!(error.contains("at most 32"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_host_ports_takes_commas_and_spaces() -> Result<()> {
+        assert_eq!(
+            parse_host_ports("8080, 1234 11434,8080")?,
+            [1234, 8080, 11434]
+        );
+        assert_eq!(parse_host_ports("  ")?, [] as [u16; 0], "empty means none");
+        for (text, fragment) in [
+            ("abc", "\"abc\""),
+            ("0", "1 to 65535"),
+            ("65536", "1 to 65535"),
+            ("80-90", "\"80-90\""),
+        ] {
+            let error = parse_host_ports(text)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(error.contains(fragment), "{text}: {error}");
+        }
+        assert_eq!(port_list(&[1234, 11434]), "1234, 11434");
+        assert_eq!(port_list(&[]), "none");
         Ok(())
     }
 

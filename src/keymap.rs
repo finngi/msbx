@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::{App, CreateField, CreateStage, Focus, Popup, Tab};
+use crate::app::{App, CreateField, CreateStage, Focus, Popup, SettingsField, Tab};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Command {
@@ -22,6 +22,8 @@ pub(crate) enum Command {
     Remove,
     Network,
     Preset,
+    Info,
+    Settings,
     Allow,
     AllowAll,
     Block,
@@ -54,6 +56,10 @@ enum Scope {
     Confirm,
     Preset,
     Help,
+    Info,
+    Settings,
+    SettingsPreset,
+    SettingsPorts,
     Search,
 }
 
@@ -121,6 +127,16 @@ static BINDINGS: &[Binding] = &[
     binding!(Main, Create, "c", "create", Char('c')),
     binding!(Main, Network, "n", "full network/back"; "network"; Char('n')),
     binding!(Main, Preset, "p", "preset", Char('p')),
+    binding!(Split, Info, "i", "sandbox info"; "info"; Char('i')),
+    Binding {
+        codes: &[Char('s')],
+        key: "Ctrl-S",
+        description: "settings: default preset and host ports",
+        hint: "settings",
+        command: Command::Settings,
+        scope: Scope::Main,
+        control: true,
+    },
     binding!(Cards, Shell, "x", "shell", Char('x')),
     binding!(Cards, Toggle, "s", "start/stop", Char('s')),
     binding!(Cards, Remove, "r", "remove sandbox"; "remove"; Char('r')),
@@ -165,6 +181,29 @@ static BINDINGS: &[Binding] = &[
     ),
     binding!(Help, Previous, "↑/k", "scroll up", Up, Char('k')),
     binding!(Help, Next, "↓/j", "scroll down", Down, Char('j')),
+    binding!(Info, Back, "Esc/i/q", "close info"; "close"; Esc, Char('i'), Char('q')),
+    binding!(Info, Previous, "↑/k", "scroll up", Up, Char('k')),
+    binding!(Info, Next, "↓/j", "scroll down", Down, Char('j')),
+    binding!(Settings, Back, "Esc", "cancel", Esc),
+    binding!(Settings, FocusNext, "Tab/⇧Tab", "field", TabKey, BackTab),
+    binding!(Settings, Enter, "Enter", "save", Enter),
+    binding!(
+        SettingsPreset,
+        Previous,
+        "↑↓←→",
+        "preset",
+        Up,
+        Down,
+        Left,
+        Right
+    ),
+    binding!(
+        SettingsPorts,
+        Edit,
+        "type",
+        "ports · Ctrl-U clear",
+        Char('\0')
+    ),
     binding!(Search, Back, "Esc", "cancel search", Esc),
     binding!(Search, Enter, "Enter", "apply search", Enter),
     binding!(Search, Edit, "type", "search · Ctrl-U clear", Char('\0')),
@@ -187,7 +226,15 @@ fn active(scope: Scope, app: &App, main: bool) -> bool {
                 Scope::Confirm,
             )
             | (Some(Popup::Preset { .. }), Scope::Preset)
-            | (Some(Popup::Help), Scope::Help) => true,
+            | (Some(Popup::Help), Scope::Help)
+            | (Some(Popup::Info { .. }), Scope::Info)
+            | (Some(Popup::Settings(_)), Scope::Settings) => true,
+            (Some(Popup::Settings(form)), Scope::SettingsPreset) => {
+                form.field == SettingsField::Preset
+            }
+            (Some(Popup::Settings(form)), Scope::SettingsPorts) => {
+                form.field == SettingsField::HostPorts
+            }
             (None, Scope::Search) => app.searching,
             _ => false,
         };

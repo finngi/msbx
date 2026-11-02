@@ -25,7 +25,7 @@ use crate::model::SandboxInfo;
 use crate::paths::Dirs;
 use crate::policy::{self, Policy, Preset, Target};
 use crate::tui_data::{self, NetworkData, read_network};
-use crate::{attach, guard, proxy, sandbox, ui};
+use crate::{attach, config, guard, proxy, sandbox, ui};
 
 /// Redraws happen at most this often, and only when something changed.
 const FRAME: Duration = Duration::from_millis(33);
@@ -94,6 +94,11 @@ enum Edit {
     Preset {
         preset: Preset,
         then_create: bool,
+    },
+    /// The `Ctrl-S` form: the preset and the host ports for new sandboxes, together.
+    Settings {
+        preset: Preset,
+        host_ports: Vec<u16>,
     },
 }
 
@@ -282,12 +287,16 @@ pub(crate) async fn run(project: PathBuf, home: Option<PathBuf>, dirs: Dirs) -> 
     run_app(app, dirs, RunMode::Live).await
 }
 
-fn new_app(project: PathBuf, home: Option<PathBuf>) -> App {
-    let agents = AgentId::value_variants()
+/// Every agent id in table order, as the create wizard lists them.
+pub(crate) fn agent_ids() -> Vec<&'static str> {
+    AgentId::value_variants()
         .iter()
         .map(|id| id.agent().id)
-        .collect();
-    let mut app = App::new(project, home, agents, preview_name);
+        .collect()
+}
+
+fn new_app(project: PathBuf, home: Option<PathBuf>) -> App {
+    let mut app = App::new(project, home, agent_ids(), preview_name);
     app.no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
     app
 }
@@ -307,6 +316,10 @@ pub(crate) async fn run_fixture(path: &Path, dirs: Dirs) -> Result<()> {
             .as_ref()
             .map_or_else(Vec::new, tui_data::rule_rows),
     );
+    app.host_ports = fixture
+        .policy
+        .as_ref()
+        .map(|policy| policy.host_ports.clone());
     app.credentials = fixture.credentials;
     app.git_changes = fixture.git_changes;
     let mode = RunMode::Fixture {
@@ -404,7 +417,7 @@ fn measure_scroll_limits(terminal: &DefaultTerminal, app: &mut App) -> Result<()
     let size = terminal.size().context("measuring the terminal")?;
     let limit = ui::detail_scroll_limit(app, size.width, size.height);
     app.set_detail_scroll_limit(limit);
-    app.set_help_scroll_limit(ui::help_scroll_limit(app, size.width, size.height));
+    app.set_popup_scroll_limit(ui::popup_scroll_limit(app, size.width, size.height));
     Ok(())
 }
 
@@ -456,6 +469,9 @@ fn step(action: Action, sandboxes: &[SandboxInfo], mode: &RunMode) -> Result<Ste
             preset,
             then_create,
         }),
+        Action::SaveSettings { preset, host_ports } => {
+            Step::Policy(Edit::Settings { preset, host_ports })
+        }
     })
 }
 
@@ -470,7 +486,7 @@ async fn edit_policy(app: &mut App, dirs: &Dirs, edit: Edit) {
         }
     );
     let preset = match &edit {
-        Edit::Preset { preset, .. } => Some(*preset),
+        Edit::Preset { preset, .. } | Edit::Settings { preset, .. } => Some(*preset),
         Edit::Allow { .. } | Edit::Deny { .. } | Edit::Remove { .. } => None,
     };
     match apply_edit(dirs, edit) {
@@ -501,6 +517,17 @@ fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<String> {
             let mut policy = policy::load(&path)?.unwrap_or_else(|| Policy::new(preset));
             policy.preset = preset;
             (policy, format!("network preset: {preset}"))
+        }
+        Edit::Settings { preset, host_ports } => {
+            // Like the first preset, saving settings creates the policy file if needed.
+            let mut policy = policy::load(&path)?.unwrap_or_else(|| Policy::new(preset));
+            policy.preset = preset;
+            policy.host_ports = policy::normalize_host_ports(host_ports)?;
+            let status = format!(
+                "settings saved: preset {preset}; host ports {} (applies to new sandboxes)",
+                policy::port_list(&policy.host_ports)
+            );
+            (policy, status)
         }
         Edit::Allow { target, sandbox } => {
             let parsed = Target::parse(&target)?;
@@ -626,7 +653,8 @@ async fn run_job(job: Job, sender: Sender<Message>, dirs: Dirs, mode: RunMode) {
     let _ = sender.send(Message::Sandboxes(sandbox::list().await)).await;
 }
 
-/// Creates a new sandbox without attaching. Like `start`, it needs the proxy first.
+/// Creates a new sandbox without attaching, with the host ports `policy.toml` has now. Like
+/// `start`, it needs the proxy first.
 async fn create(
     agent: &'static Agent,
     project: &Path,
@@ -634,8 +662,11 @@ async fn create(
     dirs: &Dirs,
     notify: sandbox::Notify<'_>,
 ) -> Result<String> {
+    let policy = policy::load(&dirs.policy_file())?.context("network policy is not initialised")?;
+    let config = config::load(&dirs.config_file())?;
+    let options = config.create_options(agent, policy.host_ports, config::host_memory_mib());
     proxy::ensure_running(dirs).await?;
-    sandbox::ensure_named(agent, project, name, notify).await
+    sandbox::ensure_named(agent, project, name, &options, notify).await
 }
 
 /// A started sandbox dials the proxy at once, so make sure one is there first.
@@ -652,6 +683,7 @@ fn apply(app: &mut App, message: Message) {
             logs: Ok(logs),
         } => app.set_logs(&name, logs),
         Message::Network(Ok(data)) => {
+            app.host_ports = data.host_ports;
             app.set_network(data.preset, data.entries);
             app.set_rules(data.rules);
         }
@@ -696,21 +728,23 @@ async fn suspend(
 }
 
 async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
-    let (name, command, project) = match foreground {
+    let (name, command, args, project, agent) = match foreground {
         Foreground::Attach {
             name,
             agent,
             project,
         } => {
+            // Read at each attach, so an edit to the agent's arguments applies without recreating.
+            let args = config::load(&dirs.config_file())?.launch_args(agent, &[]);
             proxy::ensure_running(dirs).await?;
             sandbox::prepare_existing(&name, agent, &|note| eprintln!("{note}")).await?;
-            (name, agent.command, project)
+            (name, agent.command, args, project, Some(agent))
         }
         Foreground::Exec {
             name,
             command,
             project,
-        } => (name, command, project),
+        } => (name, command, Vec::new(), project, None),
     };
     // The terminal is the agent's now, so warnings go to stderr like `msbx agent`'s; the status
     // line and the card's badge repeat them once the dashboard is back (RFC 0001).
@@ -724,7 +758,12 @@ async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
         }
         None => None,
     };
-    let code = attach::exec(&name, command, &[]).await?;
+    let code = attach::exec(&name, command, &args).await?;
+    if let Some(agent) = agent
+        && let Err(error) = sandbox::relink(&name, agent, &|note| eprintln!("{note}")).await
+    {
+        eprintln!("note: could not share a new sign-in from {name}: {error:#}");
+    }
     let mut status = format!("exited {name} (code {code})");
     if let Some(warning) = session
         .map(|session| session.finish())
@@ -788,6 +827,10 @@ mod tests {
             Action::SetPreset {
                 preset: Preset::Open,
                 then_create: false,
+            },
+            Action::SaveSettings {
+                preset: Preset::Open,
+                host_ports: vec![8080],
             },
         ];
         for action in writes {
@@ -975,13 +1018,19 @@ mod tests {
             agent: agent.map(str::to_owned),
             project: None,
             image: None,
+            created: None,
             vcpus: None,
             cpu_percent: None,
             memory_bytes: None,
             memory_limit_bytes: None,
+            disk_used_bytes: None,
+            disk_free_bytes: None,
             uptime: None,
             network: None,
             proxied: true,
+            host_ports: None,
+            user: None,
+            restricted: None,
             git_guarded: true,
             rx_bytes: None,
             tx_bytes: None,
@@ -998,7 +1047,7 @@ mod tests {
             },
             sandbox("pi-notes", Some("pi")),
             sandbox("foreign", None),
-            sandbox("future", Some("claude")),
+            sandbox("future", Some("amp")),
         ]
     }
 
@@ -1134,6 +1183,78 @@ mod tests {
         outcome
     }
 
+    #[test]
+    fn settings_create_or_update_the_policy_and_keep_its_rules() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("msbx-tui-settings-{}", std::process::id()));
+        let dirs = Dirs {
+            config: root.join("config"),
+            state: root.join("state"),
+        };
+        let outcome = (|| -> Result<()> {
+            assert_eq!(
+                step_for(Action::SaveSettings {
+                    preset: Preset::Open,
+                    host_ports: vec![8080],
+                })?,
+                Step::Policy(Edit::Settings {
+                    preset: Preset::Open,
+                    host_ports: vec![8080],
+                })
+            );
+            let status = apply_edit(
+                &dirs,
+                Edit::Settings {
+                    preset: Preset::LockedDown,
+                    host_ports: vec![8080, 1234],
+                },
+            )?;
+            assert_eq!(
+                status,
+                "settings saved: preset locked-down; host ports 1234, 8080 (applies to new \
+                 sandboxes)"
+            );
+            let created = policy::load(&dirs.policy_file())?.context("saving creates the file")?;
+            assert_eq!(created.preset, Preset::LockedDown);
+            assert_eq!(created.host_ports, [1234, 8080]);
+
+            apply_edit(
+                &dirs,
+                Edit::Allow {
+                    target: name("pypi.org"),
+                    sandbox: None,
+                },
+            )?;
+            apply_edit(
+                &dirs,
+                Edit::Settings {
+                    preset: Preset::Balanced,
+                    host_ports: Vec::new(),
+                },
+            )?;
+            let saved = policy::load(&dirs.policy_file())?.context("saved policy")?;
+            assert_eq!(saved.preset, Preset::Balanced);
+            assert_eq!(saved.host_ports, [] as [u16; 0]);
+            assert_eq!(saved.allow, [Target::parse("pypi.org")?], "rules survive");
+            assert_eq!(read_network(&dirs)?.host_ports, Some(vec![]));
+            assert!(
+                apply_edit(
+                    &dirs,
+                    Edit::Settings {
+                        preset: Preset::Open,
+                        host_ports: vec![0],
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(policy::load(&dirs.policy_file())?, Some(saved));
+            Ok(())
+        })();
+        if root.exists() {
+            std::fs::remove_dir_all(&root)?;
+        }
+        outcome
+    }
+
     #[tokio::test]
     async fn edit_policy_opens_create_after_the_first_preset() -> Result<()> {
         let root = std::env::temp_dir().join(format!("msbx-tui-first-{}", std::process::id()));
@@ -1239,7 +1360,7 @@ mod tests {
         for (sandbox, message) in [
             ("foreign", "sandbox foreign has no msbx agent"),
             ("gone", "sandbox gone has no msbx agent"),
-            ("future", "sandbox future has unknown agent claude"),
+            ("future", "sandbox future has unknown agent amp"),
         ] {
             let error = step_for(Action::Attach {
                 name: name(sandbox),
@@ -1282,13 +1403,13 @@ mod tests {
             "creating stays on the dashboard; ↵ attaches later"
         );
         let unknown = step_for(Action::Create {
-            agent: name("claude"),
+            agent: name("amp"),
             project,
-            name: name("claude-custom"),
+            name: name("amp-custom"),
         });
         assert_eq!(
             unknown.err().map(|error| error.to_string()).as_deref(),
-            Some("unknown agent claude")
+            Some("unknown agent amp")
         );
         Ok(())
     }
@@ -1309,7 +1430,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(preview_name("claude", Path::new("/work/api")), "");
+        assert_eq!(preview_name("amp", Path::new("/work/api")), "");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 # How-to guides
 
-- [Run Codex or pi in a project](how-to/run-codex-or-pi.md)
+- [Run an agent in a project](how-to/run-codex-or-pi.md)
 - [Reach Ollama or LM Studio on your Mac](how-to/reach-host-models.md)
 - [Control network access](how-to/control-network-access.md)
 - [Keep git on your Mac safe from the agent](how-to/guard-git.md)
@@ -17,6 +17,7 @@
 # Reference
 
 - [Commands](reference/commands.md)
+- [Agents](reference/agents.md)
 - [Dashboard keys](reference/dashboard-keys.md)
 - [Sandbox defaults](reference/sandbox-defaults.md)
 
@@ -39,3 +40,5 @@
   - [0008 Network](rfcs/0008-network.md)
   - [0009 Ports](rfcs/0009-ports.md)
   - [0010 Dashboard](rfcs/0010-dashboard.md)
+  - [0011 Host ports, info and settings](rfcs/0011-info-settings.md)
+  - [0012 Agents, defaults and config](rfcs/0012-agents-and-defaults.md)

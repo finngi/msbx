@@ -17,6 +17,8 @@ switching focus still works. `NO_COLOR=1` disables colors while markers and stat
 | `c` | Open the create wizard; choose a preset first if no policy exists |
 | `n` | Open the full network view |
 | `p` | Choose the network preset |
+| `i` | Show the selected sandbox's info (outside the full network view) |
+| `Ctrl-S` | Open settings: default preset and host ports |
 | `?` / `Ctrl-H` | Show contextual key help outside a form or search input |
 | `q` / `Ctrl-C` | Quit |
 
@@ -109,10 +111,13 @@ rule reloads the proxy policy for subsequent connections.
 
 ## Create wizard
 
-Choose Codex, pi or shell from the agent list. Each has a description and credential summary:
-Codex reports `OPENAI_API_KEY` availability from the shell or macOS Keychain and shared login
-presence; pi reports shared login presence; shell needs no credentials. Presence does not
-prove a credential is valid, and values are never displayed.
+Choose one of the twelve [agents](agents.md), one row each with a short description. The list
+scrolls to keep the selection visible, and the title shows its position (`2/12`). Below the
+list, the selected agent's credential summary names the API key variables that are set in the
+shell, Keychain or Secret Service (`GH_TOKEN, GITHUB_TOKEN: available`) or, when none is, all
+of them (`COPILOT_GITHUB_TOKEN or GH_TOKEN or GITHUB_TOKEN: missing`; any one is enough), and
+whether its shared sign-in volume holds a sign-in. Agents with neither say `no keys or shared
+sign-in`. Presence does not prove a credential is valid, and values are never displayed.
 
 Continue to configure the name and workspace. The name defaults to `<agent>-<folder>`; editing
 it preserves your choice when the folder changes. Names use lowercase ASCII letters, digits
@@ -144,6 +149,44 @@ Opened by `p`, or before the first create when `policy.toml` does not exist.
 | `↑` / `↓` / `←` / `→` | Choose Open, Balanced or Locked Down |
 | `Enter` | Save the preset, then open the create wizard on first run |
 | `Esc` | Cancel |
+
+## Info popup
+
+`i` opens everything msbx knows about the selected card, including sandboxes msbx did not
+create. Fields the runtime does not report show `—`.
+
+| Section | Fields |
+|---|---|
+| Identity | Name, agent, project, status, creation time, image |
+| Resources | vCPUs and current load, memory used / limit, root disk used and free, uptime, traffic in and out |
+| Security | Guest user (`node` for msbx sandboxes), security profile (`restricted`), git guard |
+| Network | Whether the msbx proxy applies, the current preset, the host ports set at create and the ones configured now, and the number of rules scoped to this sandbox |
+| Mounts and secrets | Mounts, and secret variable names only; values never leave your Mac |
+
+When the configured host ports differ from the sandbox's, the row is yellow and names the
+`msb rm -f NAME` that starts the recreate. `↑` / `↓` (`k` / `j`) scroll; `Esc`, `i` or `q`
+close.
+
+## Settings
+
+`Ctrl-S` opens two settings, saved together in `policy.toml`:
+
+- Default network preset: Open, Balanced or Locked Down, the same choice as `p`. Saving
+  reloads the proxy, so the next connection follows it.
+- Host ports: the ports on your Mac (`host.microsandbox.internal`) new sandboxes may reach,
+  separated by commas or spaces. Empty allows none; DNS still works. They are checked like
+  `msbx policy host-ports` and an invalid list stays in the form with an error. They apply only
+  to sandboxes created afterwards; recreate a sandbox to change its ports.
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift-Tab` | Switch between the preset and the host ports |
+| `↑` / `↓` / `←` / `→` | Choose the preset (preset field) |
+| Type, `Ctrl-U` | Edit or clear the host ports (ports field) |
+| `Enter` | Save both |
+| `Esc` | Cancel |
+
+Without a `policy.toml`, saving creates it, as the first preset choice does.
 
 ## Confirmations and help
 

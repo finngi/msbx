@@ -1,6 +1,7 @@
 mod agents;
 mod app;
 mod attach;
+mod config;
 mod guard;
 mod hostgit;
 mod input;
@@ -56,11 +57,13 @@ enum Command {
         /// Create or start the sandbox, but don't attach; attach later with the same command.
         #[arg(short, long, conflicts_with = "args")]
         detach: bool,
-        /// Arguments passed to the agent, after `--`.
+        /// Arguments for the agent, after `--`: added after its defaults (such as the
+        /// auto-approve flag) when the first starts with `-`, used instead of them otherwise.
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Keep an agent API key in the macOS Keychain, so it need not be exported in every shell.
+    /// Keep an agent API key in the macOS Keychain or the Linux Secret Service (secret-tool), so
+    /// it need not be exported in every shell.
     #[command(subcommand)]
     Secret(SecretAction),
     /// Network policy: which hosts sandboxes may reach (applied live by the msbx proxy).
@@ -76,12 +79,12 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SecretAction {
-    /// Store VAR in the Keychain; `security` prompts for the value, msbx never sees it.
+    /// Store VAR; `security` or `secret-tool` prompts for the value, msbx never sees it.
     Set {
         #[arg(value_parser = secret_var_parser())]
         var: String,
     },
-    /// Remove VAR from the Keychain.
+    /// Remove VAR from the key store.
     Rm {
         #[arg(value_parser = secret_var_parser())]
         var: String,
@@ -143,10 +146,20 @@ enum PolicyAction {
     },
     /// Change the global preset; takes effect on the next connection.
     Preset { preset: Preset },
+    /// Show or set the Mac ports (host.microsandbox.internal) new sandboxes may reach.
+    HostPorts {
+        /// Ports, separated by spaces or commas; replaces the list. Omit to show it.
+        #[arg(value_name = "PORT")]
+        ports: Vec<String>,
+        /// Allow no Mac ports (DNS still works).
+        #[arg(long, conflicts_with = "ports")]
+        none: bool,
+    },
 }
 
 impl PolicyAction {
-    /// Whether the action changes policy.toml, so the running proxy must reload it.
+    /// Whether the action changes policy.toml, so the running proxy must reload it. Not
+    /// `host-ports`: host traffic never reaches the proxy, the ports apply only at create.
     fn writes(&self) -> bool {
         matches!(
             self,
@@ -187,6 +200,11 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     let dirs = Dirs::from_env()?;
+    // Checked before anything starts, so a typo never half-creates a sandbox (RFC 0002).
+    let config = match &cli.command {
+        None | Some(Command::Agent { .. }) => config::load(&dirs.config_file())?,
+        Some(_) => config::Config::default(),
+    };
     match cli.command {
         None => {
             #[cfg(debug_assertions)]
@@ -214,10 +232,15 @@ async fn run(cli: Cli) -> Result<u8> {
             let project = project_folder(path)?;
             secrets::resolve_environment(&dirs)?;
             sandbox::use_runtime(&attach::msb_path()?);
-            policy_cli::require_or_ask(&dirs)?;
+            let policy = policy_cli::require_or_ask(&dirs)?;
             proxy::ensure_running(&dirs).await?;
             let agent = agent.agent();
-            let name = sandbox::ensure(agent, &project, &|note| eprintln!("{note}")).await?;
+            let options =
+                config.create_options(agent, policy.host_ports, config::host_memory_mib());
+            let name = sandbox::ensure(agent, &project, &options, &|note| {
+                eprintln!("{note}");
+            })
+            .await?;
             // Detached or not, launching is when the project's git files get compared with
             // the baseline and the baseline moves on (RFC 0001).
             let (session, warning) = guard::Session::start(&dirs, &name, &project)?;
@@ -232,7 +255,11 @@ async fn run(cli: Cli) -> Result<u8> {
                 );
                 return Ok(0);
             }
+            let args = config.launch_args(agent, &args);
             let code = attach::exec(&name, agent.command, &args).await?;
+            if let Err(error) = sandbox::relink(&name, agent, &|note| eprintln!("{note}")).await {
+                eprintln!("note: could not share a new sign-in from {name}: {error:#}");
+            }
             if let Some(warning) = session.finish()? {
                 eprintln!("{warning}");
             }
@@ -242,7 +269,7 @@ async fn run(cli: Cli) -> Result<u8> {
         Some(Command::Secret(SecretAction::Rm { var })) => secrets::rm(&var),
         Some(Command::Policy(action)) => {
             let writes = action.writes();
-            let code = run_policy(action, &dirs)?;
+            let code = run_policy(action, &dirs).await?;
             if writes {
                 // Apply the edit before returning, not on the proxy's next file check.
                 proxy::reload(&dirs).await?;
@@ -273,7 +300,7 @@ async fn run(cli: Cli) -> Result<u8> {
     }
 }
 
-fn run_policy(action: PolicyAction, dirs: &Dirs) -> Result<u8> {
+async fn run_policy(action: PolicyAction, dirs: &Dirs) -> Result<u8> {
     let text = match action {
         PolicyAction::Init { preset } => policy_cli::init(dirs, preset)?,
         PolicyAction::Ls { scope } => {
@@ -311,9 +338,33 @@ fn run_policy(action: PolicyAction, dirs: &Dirs) -> Result<u8> {
             })
         }
         PolicyAction::Preset { preset } => policy_cli::set_preset(dirs, preset)?,
+        PolicyAction::HostPorts { ports, none } if ports.is_empty() && !none => {
+            policy_cli::show_host_ports(&policy_cli::load_required(dirs)?)
+        }
+        PolicyAction::HostPorts { ports, .. } => {
+            let (mut text, saved) = policy_cli::set_host_ports(dirs, &ports.join(" "))?;
+            text.push_str(&host_port_drift(&saved).await);
+            text
+        }
     };
     policy_cli::emit(&text)?;
     Ok(0)
+}
+
+/// Which existing msbx sandboxes were created with other host ports. Listing is best effort:
+/// the new ports are already saved, so a missing runtime only costs the hint.
+async fn host_port_drift(ports: &[u16]) -> String {
+    let listed = match attach::msb_path() {
+        Ok(msb) => {
+            sandbox::use_runtime(&msb);
+            sandbox::list().await
+        }
+        Err(error) => Err(error),
+    };
+    match listed {
+        Ok(sandboxes) => policy_cli::host_port_drift(&sandboxes, ports),
+        Err(error) => format!("note: could not check existing sandboxes: {error:#}\n"),
+    }
 }
 
 /// The canonical project folder, so the TUI and `msbx agent` name and label sandboxes alike.
@@ -412,19 +463,24 @@ mod tests {
             agent_command(&["msbx", "agent", "codex", "--", "--version"])?,
             (AgentId::Codex, None, vec!["--version".to_owned()])
         );
+        assert_eq!(
+            agent_command(&["msbx", "agent", "docker-agent", "--", "--debug"])?,
+            (AgentId::DockerAgent, None, vec!["--debug".to_owned()])
+        );
         Ok(())
     }
 
     #[test]
     fn unknown_agent_lists_the_valid_agents() -> Result<()> {
-        let error = Cli::try_parse_from(["msbx", "agent", "claude"])
+        let error = Cli::try_parse_from(["msbx", "agent", "amp"])
             .err()
             .context("an unknown agent must not parse")?;
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert!(
-            error
-                .to_string()
-                .contains("[possible values: codex, pi, shell]"),
+            error.to_string().contains(
+                "[possible values: claude, codex, copilot, cursor, devin, docker-agent, \
+                         droid, gemini, kiro, opencode, pi, shell]"
+            ),
             "{error}"
         );
         Ok(())
@@ -450,14 +506,14 @@ mod tests {
 
     #[test]
     fn unknown_secret_var_lists_the_valid_names() -> Result<()> {
-        let error = Cli::try_parse_from(["msbx", "secret", "set", "GITHUB_TOKEN"])
+        let error = Cli::try_parse_from(["msbx", "secret", "set", "MSBX_PROXY_TOKEN"])
             .err()
             .context("an unknown var must not parse")?;
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert!(
             error
                 .to_string()
-                .contains("[possible values: OPENAI_API_KEY]"),
+                .contains("[possible values: ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN,"),
             "{error}"
         );
         Ok(())
@@ -522,6 +578,35 @@ mod tests {
             PolicyAction::Preset {
                 preset: Preset::Open
             }
+        );
+        assert_eq!(
+            policy_command(&["msbx", "policy", "host-ports"])?,
+            PolicyAction::HostPorts {
+                ports: vec![],
+                none: false
+            }
+        );
+        assert_eq!(
+            policy_command(&["msbx", "policy", "host-ports", "1234", "8080,9000"])?,
+            PolicyAction::HostPorts {
+                ports: vec!["1234".to_owned(), "8080,9000".to_owned()],
+                none: false
+            }
+        );
+        assert_eq!(
+            policy_command(&["msbx", "policy", "host-ports", "--none"])?,
+            PolicyAction::HostPorts {
+                ports: vec![],
+                none: true
+            }
+        );
+        assert!(
+            Cli::try_parse_from(["msbx", "policy", "host-ports", "--none", "1234"]).is_err(),
+            "--none takes no ports"
+        );
+        assert!(
+            !policy_command(&["msbx", "policy", "host-ports", "1234"])?.writes(),
+            "the proxy never sees host traffic, so it needs no reload"
         );
         let error = Cli::try_parse_from(["msbx", "policy", "init", "strict"])
             .err()

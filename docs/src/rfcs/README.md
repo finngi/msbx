@@ -27,7 +27,7 @@ Each RFC starts with a short metadata list:
 | RFC | Feature | What you get | Depends on |
 |---|---|---|---|
 | 0001 | [Git safety](0001-git-safety.md) | An agent can't use your repo's `.git` to run code on your Mac without you noticing | none |
-| 0002 | [Config file](0002-config.md) | One `~/.config/msbx/config.toml` for defaults and per-project settings | none |
+| 0002 | [Config file](0002-config.md) (implemented in part) | One `~/.config/msbx/config.toml` for defaults and per-project settings | none |
 | 0003 | [GitHub access](0003-github-access.md) | Agents can `git push` and `pull` with a repo-scoped token that never enters the VM | 0002 |
 | 0004 | [Shared logins](0004-shared-logins.md) | Sign in to Codex or pi once, reuse it in every project | 0002 |
 | 0005 | [Detachable sessions](0005-detachable-sessions.md) | Close the terminal, the agent keeps working; reattach later | none |
@@ -36,6 +36,8 @@ Each RFC starts with a short metadata list:
 | 0008 | [Network](0008-network.md) (implemented) | Allow and deny hosts per sandbox, live, through the msbx proxy; see what was blocked | none |
 | 0009 | [Ports](0009-ports.md) | Open a dev server running in the sandbox from your browser, without restarting it | none |
 | 0010 | [Dashboard](0010-dashboard.md) | Consistent pane navigation, a create wizard and network inspection and rule editing | 0008 |
+| 0011 | [Host ports, info and settings](0011-info-settings.md) (implemented) | Choose which Mac ports new sandboxes reach; `i` shows a sandbox's details; `Ctrl-S` edits the defaults | 0008, 0010 |
+| 0012 | [Agents, defaults and config](0012-agents-and-defaults.md) (implemented) | sbx's agents plus pi, launched without prompts; `node:24-bookworm`, half the host's memory; image, resources and agent arguments in `config.toml` | 0002, 0004 |
 
 ```mermaid
 flowchart LR

@@ -1,6 +1,6 @@
 ---
 source: src/ui.rs
-assertion_line: 1551
+assertion_line: 1861
 expression: "screens.join(\"\\n\")"
 ---
 100x30
@@ -33,7 +33,7 @@ expression: "screens.join(\"\\n\")"
 "│└╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘│  │                                                              │"
 "│                                │  │                                                              │"
 "└────────────────────────────────┘  └──────────────────────────────────────────────────────────────┘"
-"↑↓←→/Tab navigate  [ ] tabs  c create  q quit  n network  p preset  Esc back/clear            ? help"
+"↑↓←→/Tab navigate  [ ] tabs  c create  q quit  n network  p preset  i info  Esc back/clear    ? help"
 
 80x24
 "msbx   microVM sandboxes for coding agents                                ? help"

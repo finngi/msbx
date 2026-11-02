@@ -1,6 +1,6 @@
 ---
 source: src/ui.rs
-assertion_line: 1551
+assertion_line: 1886
 expression: "screens.join(\"\\n\")"
 ---
 100x30
@@ -11,8 +11,8 @@ expression: "screens.join(\"\\n\")"
 "││ ▸ ● codex-api                ││  │[Overview]  Logs   Network   Rules   [/] tabs                 │"
 "││ codex               ↵ attach ││  │                                                              │"
 "││ ~/dev/xa╭ Configure codex · 2/2 ─────────────────────────────────────────────────────╮          │"
-"││ cpu ▮▯▯▯│ OPENAI_API_KEY: shell/Keychain available                                   │          │"
-"││ stop    │ shared login: missing                                                      │          │"
+"││ cpu ▮▯▯▯│ OPENAI_API_KEY: available (shell/Keychain)                                 │          │"
+"││ stop    │ msbx-login-codex: missing                                                  │          │"
 "│└─────────│ ▸ Name                                                                     │          │"
 "│┌─────────│ codex-api                                                                  │          │"
 "││ ■ pi-not│                                                                            │          │"
@@ -40,8 +40,8 @@ expression: "screens.join(\"\\n\")"
 "                                                                                "
 "┌ > Sandboxes ─────────────────────────────────────────────────────────────────┐"
 "│╭ Configure codex · 2/2 ─────────────────────────────────────────────────────╮│"
-"││ OPENAI_API_KEY: shell/Keychain available                                   ││"
-"││ shared login: missing                                                      ││"
+"││ OPENAI_API_KEY: available (shell/Keychain)                                 ││"
+"││ msbx-login-codex: missing                                                  ││"
 "││ ▸ Name                                                                     ││"
 "││ codex-api                                                                  ││"
 "││                                                                            ││"
@@ -64,8 +64,8 @@ expression: "screens.join(\"\\n\")"
 60x20
 "msbx   microVM sandboxes for coding agents            ? help"
 "╭ Configure codex · 2/2 ───────────────────────────────────╮"
-"│ OPENAI_API_KEY: shell/Keychain available                 │"
-"│ shared login: missing                                    │"
+"│ OPENAI_API_KEY: available (shell/Keychain)               │"
+"│ msbx-login-codex: missing                                │"
 "│ ▸ Name                                                   │"
 "│ codex-api                                                │"
 "│                                                          │"

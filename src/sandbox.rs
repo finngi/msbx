@@ -1,5 +1,6 @@
 //! The only module that talks to the microsandbox SDK. Everything it exposes is plain msbx data.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,10 +14,12 @@ use microsandbox::{
     MAX_SANDBOX_NAME_BYTES, MicrosandboxError, NetworkAction, NetworkPolicy, Sandbox,
     SandboxMetrics, SecretSource, Volume,
 };
-use microsandbox_types::{Action, Destination, DestinationGroup, Direction, NetworkSpec};
+use microsandbox_types::{
+    Action, Destination, DestinationGroup, Direction, NetworkSpec, PortRange, Protocol,
+};
 
-use crate::agents::{self, Agent, Login};
-use crate::model::{SandboxInfo, Status, validate_name};
+use crate::agents::{self, Agent, Install, Login};
+use crate::model::{CreateOptions, SandboxInfo, Status, validate_name};
 use crate::{guard, hostgit, models, proxy};
 
 /// Where progress and notes from setting up a sandbox go: stderr for the CLI, the status line
@@ -34,17 +37,22 @@ const LABEL_GIT: &str = "msbx.git";
 const GIT_GUARDED: &str = "guarded";
 const GIT_NONE: &str = "none";
 
-/// The unprivileged user the agent runs as: uid 1000 in `node:24-bookworm-slim`. Not root, so
-/// it cannot unmount the read-only git mounts; under the `restricted` profile neither can root.
-const AGENT_USER: &str = "node";
+/// The unprivileged user the agent runs as: uid 1000, which is `node` in `node:24-bookworm`.
+/// A uid rather than a name, because the SDK refuses to boot a sandbox whose user is not in the
+/// image's `/etc/passwd` yet; the install script creates `node` when no account has uid 1000.
+/// Not root, so it cannot unmount the read-only git mounts; under the `restricted` profile
+/// neither can root.
+const AGENT_USER: &str = "1000";
 
-/// Host ports the sandbox may reach directly (Ollama, LM Studio); fixed at create because
-/// host-bound traffic never goes through the proxy.
-const HOST_MODEL_PORTS: [u16; 2] = [11434, 1234];
+/// The account the install script creates for [`AGENT_USER`] in images without one.
+const AGENT_NAME: &str = "node";
+
 const INSTALL_MARKER: &str = "/root/.msbx-installed";
 
-/// Guest mount point of the per-agent login volume (RFC 0004), under the agent user's home.
-const LOGIN_DIR: &str = ".msbx-login";
+/// Guest mount point of the per-agent login volume (RFC 0004) in new sandboxes. Fixed, because
+/// the agent user's home is only known once the image is installed; older sandboxes have it
+/// under their user's home, which `prepare` reads back from the stored mounts.
+const LOGIN_MOUNT: &str = "/home/node/.msbx-login";
 
 /// Login volumes are `msbx-login-<agent>`.
 const LOGIN_VOLUME_PREFIX: &str = "msbx-login-";
@@ -54,10 +62,6 @@ const LOGIN_QUOTA_MIB: u32 = 16;
 
 /// Exit code of the login script when the sandbox predates the login volume.
 const LOGIN_NOT_MOUNTED: i32 = 3;
-
-/// Guest memory size. This is a ceiling, not a reservation: the host only backs pages the guest
-/// actually touches, so an idle sandbox costs far less than this.
-const MEMORY_MIB: u32 = 32 * 1024;
 
 /// How long a graceful stop may take before we give up (without killing the VM).
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -125,9 +129,16 @@ enum ExistingMode {
 /// first use, and returns the sandbox name. The VM keeps running after this returns.
 ///
 /// `project` must be absolute; it is mounted and used as the working directory at the same path.
-pub(crate) async fn ensure(agent: &Agent, project: &Path, notify: Notify<'_>) -> Result<String> {
+/// `options` (from `config.toml` and `policy.toml`) apply only to a newly created sandbox; an
+/// existing sandbox keeps what it was created with.
+pub(crate) async fn ensure(
+    agent: &Agent,
+    project: &Path,
+    options: &CreateOptions,
+    notify: Notify<'_>,
+) -> Result<String> {
     let name = sandbox_name(agent, project);
-    ensure_with_mode(agent, project, &name, ExistingMode::Reuse, notify).await
+    ensure_with_mode(agent, project, &name, ExistingMode::Reuse, options, notify).await
 }
 
 /// Creates the dashboard's custom name, failing if another creator claims it first.
@@ -135,9 +146,18 @@ pub(crate) async fn ensure_named(
     agent: &Agent,
     project: &Path,
     name: &str,
+    options: &CreateOptions,
     notify: Notify<'_>,
 ) -> Result<String> {
-    ensure_with_mode(agent, project, name, ExistingMode::CreateOnly, notify).await
+    ensure_with_mode(
+        agent,
+        project,
+        name,
+        ExistingMode::CreateOnly,
+        options,
+        notify,
+    )
+    .await
 }
 
 async fn ensure_with_mode(
@@ -145,6 +165,7 @@ async fn ensure_with_mode(
     project: &Path,
     name: &str,
     mode: ExistingMode,
+    options: &CreateOptions,
     notify: Notify<'_>,
 ) -> Result<String> {
     validate_name(name).map_err(anyhow::Error::msg)?;
@@ -157,12 +178,14 @@ async fn ensure_with_mode(
         ensure_login_volume(volume, agent.id).await?;
     }
 
-    let static_policy = proxied_policy()?;
+    let static_policy = proxied_policy(&options.host_ports)?;
     let (secrets, missing) = agents::select_secrets(agent, |var| std::env::var(var).ok());
-    for var in missing {
+    if secrets.is_empty() && !missing.is_empty() {
+        let vars = missing.join(" or ");
         notify(format!(
-            "note: {var} is not set on the host; not forwarding it to {name} \
-             (export it, or store it with `msbx secret set {var}`)"
+            "note: {vars} is not set on the host; not forwarding it to {name} \
+             (export it, or store it with `msbx secret set {}`)",
+            missing[0]
         ));
     }
     let plan = guard::mounts(project)?;
@@ -176,9 +199,10 @@ async fn ensure_with_mode(
         GIT_GUARDED
     };
     let mut builder = Sandbox::builder(name)
-        .image(agents::IMAGE)
-        .cpus(host_cpus())
-        .memory(MEMORY_MIB)
+        .image(options.image.as_str())
+        .cpus(options.cpus)
+        // A ceiling, not a reservation: the host only backs pages the guest touches.
+        .memory(options.memory_mib)
         .volume(project_path, |mount| mount.bind(project))
         .workdir(project_path)
         // Not root, and no CAP_SYS_ADMIN even for root: the read-only git mounts below cannot
@@ -216,7 +240,7 @@ async fn ensure_with_mode(
     }
     if let Some(volume) = &login_volume {
         // Files on the volume can be read and replaced, never run (RFC 0004 "Security").
-        builder = builder.volume(login_mount(&home_dir(Some(AGENT_USER))), |mount| {
+        builder = builder.volume(LOGIN_MOUNT, |mount| {
             mount.named(volume.as_str()).noexec().nosuid().nodev()
         });
     }
@@ -224,10 +248,14 @@ async fn ensure_with_mode(
         // Store only a reference: the SDK reads the host variable each time it boots the VM, so
         // the key never lands in microsandbox's database (unlike `secret_env`, which stores it).
         builder = builder.secret(|entry| {
-            entry
+            let entry = entry
                 .env(secret.env_var)
-                .source(SecretSource::env(secret.env_var))
-                .allow(secret.host)
+                .source(SecretSource::env(secret.env_var));
+            // The SDK keeps every allowed host (`SecretBuilder::allow` pushes).
+            secret
+                .hosts
+                .iter()
+                .fold(entry, microsandbox::sandbox::SecretBuilder::allow)
         });
     }
     // `connect_or_create` starts a concurrent winner with its persisted config. Dashboard
@@ -244,16 +272,23 @@ async fn ensure_with_mode(
     prepared.map(|()| name.to_owned())
 }
 
-/// The static policy of a proxied sandbox: deny by default, DNS and the local model ports on the
-/// host, and TCP to public addresses (which msb then sends through the proxy). Private, loopback,
+/// The static policy of a proxied sandbox: deny by default, DNS and `host_ports` on the host,
+/// and TCP to public addresses (which msb then sends through the proxy). Private, loopback,
 /// link-local and metadata addresses match no rule, so the default denies them.
 /// Rules are first-match (microsandbox-network 0.7.11 `NetworkPolicy::evaluate_egress`).
-fn proxied_policy() -> Result<NetworkPolicy> {
-    NetworkPolicy::builder()
+///
+/// Host traffic never goes through the proxy (`proxy/types.rs:206` `select_for_destination`),
+/// so these ports are fixed at create; `modify()` has no network option.
+fn proxied_policy(host_ports: &[u16]) -> Result<NetworkPolicy> {
+    let mut builder = NetworkPolicy::builder()
         .default_egress(NetworkAction::Deny)
         .default_ingress(NetworkAction::Allow)
-        .egress(|rule| rule.udp().tcp().port(53).allow_host())
-        .egress(|rule| rule.tcp().ports(HOST_MODEL_PORTS).allow_host())
+        .egress(|rule| rule.udp().tcp().port(53).allow_host());
+    // A rule with no ports matches every port, so "no host ports" must mean no rule.
+    if !host_ports.is_empty() {
+        builder = builder.egress(|rule| rule.tcp().ports(host_ports.iter().copied()).allow_host());
+    }
+    builder
         .egress(|rule| rule.tcp().allow_public())
         .build()
         .map_err(|error| anyhow::anyhow!("{error}"))
@@ -284,37 +319,95 @@ async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str, notify: Notify<'_
              .git/hooks and .git/config; recreate it with `msb rm -f {name}`"
         ));
     }
-    let home = home_dir(spec.runtime.user.as_deref());
-    install_once(sandbox, agent, name, notify).await?;
-    link_login(sandbox, agent, name, &home, notify).await?;
+    install_once(sandbox, agent, name, sandbox_user(sandbox), notify).await?;
+    let home = link_logins(sandbox, agent, name, notify).await?;
     write_models(sandbox, agent, name, &home, notify).await?;
     seed_identity(sandbox, name).await
 }
 
-/// Home of the guest user the agent runs as; `None` is the image default, root.
-fn home_dir(user: Option<&str>) -> String {
-    match user {
-        None | Some("root") => "/root".to_owned(),
-        Some(user) => format!("/home/{}", user.split(':').next().unwrap_or(user)),
-    }
+/// The sandbox's user; no user means the image's default user, root.
+fn sandbox_user(sandbox: &Sandbox) -> &str {
+    sandbox
+        .config()
+        .spec
+        .runtime
+        .user
+        .as_deref()
+        .unwrap_or("root")
 }
 
-fn login_mount(home: &str) -> String {
-    format!("{home}/{LOGIN_DIR}")
+/// Links the agent's login files to the shared volume and returns the user's home.
+async fn link_logins(
+    sandbox: &Sandbox,
+    agent: &Agent,
+    name: &str,
+    notify: Notify<'_>,
+) -> Result<String> {
+    let user = sandbox_user(sandbox);
+    let home = guest_home(sandbox, name, user).await?;
+    let mount = stored_login_mount(&sandbox.config().spec.mounts);
+    link_login(sandbox, agent, name, &home, mount, user, notify).await?;
+    Ok(home)
+}
+
+/// After an agent session: moves a sign-in made in it onto the shared volume, so other
+/// sandboxes of the agent see it now rather than at this sandbox's next launch. A fresh sign-in
+/// replaces the link with a plain file (Codex 0.166 `login` deletes `auth.json`, then writes
+/// it). A sandbox that is no longer running is left for its next launch to migrate.
+pub(crate) async fn relink(name: &str, agent: &Agent, notify: Notify<'_>) -> Result<()> {
+    if agent.logins.is_empty() {
+        return Ok(());
+    }
+    let Ok(sandbox) = get(name).await?.connect().await else {
+        return Ok(());
+    };
+    let linked = link_logins(&sandbox, agent, name, notify).await;
+    sandbox.detach().await;
+    linked.map(|_| ())
+}
+
+/// The home folder of `user` in the guest, from its `$HOME` (the image's `/etc/passwd`).
+async fn guest_home(sandbox: &Sandbox, name: &str, user: &str) -> Result<String> {
+    let output = sandbox
+        .shell_with(r#"printf '%s' "$HOME""#, |options| options.user(user))
+        .await
+        .with_context(|| format!("reading the agent user's home in {name}"))?;
+    let home = String::from_utf8_lossy(output.stdout_bytes())
+        .trim()
+        .to_owned();
+    // The home is quoted into later scripts.
+    if !output.status().success || !home.starts_with('/') || home == "/" || home.contains('\'') {
+        bail!("user {user} in {name} has no home folder; recreate it with `msb rm -f {name}`");
+    }
+    Ok(home)
+}
+
+/// Where the sandbox's login volume is mounted, from its stored mounts.
+fn stored_login_mount(mounts: &[VolumeMount]) -> Option<&str> {
+    login_mount_of(mounts.iter().filter_map(|mount| match mount {
+        VolumeMount::Named { name, guest, .. } => Some((name.as_str(), guest.as_str())),
+        _ => None,
+    }))
+}
+
+/// The guest path of the login volume among `(volume, guest path)` named mounts.
+fn login_mount_of<'a>(named: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<&'a str> {
+    named
+        .into_iter()
+        .find(|(volume, _)| volume.starts_with(LOGIN_VOLUME_PREFIX))
+        .map(|(_, guest)| guest)
 }
 
 /// The named volume holding the agent's sign-in, shared by all its sandboxes; `None` for
 /// agents without a login file.
 pub(crate) fn login_volume(agent: &Agent) -> Option<String> {
-    agent
-        .login
-        .as_ref()
-        .map(|_| format!("{LOGIN_VOLUME_PREFIX}{}", agent.id))
+    (!agent.logins.is_empty()).then(|| format!("{LOGIN_VOLUME_PREFIX}{}", agent.id))
 }
 
-/// Checks for a shared sign-in without creating a volume or reading credential contents.
+/// Checks for a shared sign-in (the agent's first login file) without creating a volume or
+/// reading credential contents.
 pub(crate) async fn shared_login(agent: &Agent) -> Result<Option<bool>> {
-    let Some(login) = &agent.login else {
+    let Some(login) = agent.logins.first() else {
         return Ok(None);
     };
     let volume = login_volume(agent).context("agent login volume name")?;
@@ -368,39 +461,49 @@ async fn ensure_login_volume_for(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Links the agent's credential file to the login volume, keeping a sign-in the agent made
+/// Links each of the agent's login files to the login volume, keeping a sign-in the agent made
 /// since the last start. Sandboxes created before the volume existed get a note instead.
 async fn link_login(
     sandbox: &Sandbox,
     agent: &Agent,
     name: &str,
     home: &str,
+    mount: Option<&str>,
+    owner: &str,
     notify: Notify<'_>,
 ) -> Result<()> {
-    let Some(login) = &agent.login else {
+    if agent.logins.is_empty() {
         return Ok(());
-    };
-    // Root, so a file left on the volume by an older (root) sandbox can be handed to the agent user.
-    let output = sandbox
-        .shell_with(login_script(login, home), |options| options.user("root"))
-        .await
-        .with_context(|| format!("linking the {} login in {name}", agent.id))?;
-    match output.status().code {
-        0 => Ok(()),
-        LOGIN_NOT_MOUNTED => {
-            notify(format!(
-                "note: {name} was created without a login volume, so its {} sign-in is not \
-                 shared; recreate it with `msb rm -f {name}`",
-                agent.id
-            ));
-            Ok(())
-        }
-        code => bail!(
-            "linking the {} login in {name} failed with exit code {code}:\n{}",
-            agent.id,
-            String::from_utf8_lossy(output.stderr_bytes()).trim()
-        ),
     }
+    let mount = mount.unwrap_or("/nonexistent/.msbx-login");
+    for login in agent.logins {
+        // Root, so a file left on the volume by an older (root) sandbox can be handed to the
+        // agent user.
+        let output = sandbox
+            .shell_with(login_script(login, home, mount, owner), |options| {
+                options.user("root")
+            })
+            .await
+            .with_context(|| format!("linking the {} login in {name}", agent.id))?;
+        match output.status().code {
+            0 => {}
+            LOGIN_NOT_MOUNTED => {
+                notify(format!(
+                    "note: {name} was created without a login volume, so its {} sign-in is not \
+                     shared; recreate it with `msb rm -f {name}`",
+                    agent.id
+                ));
+                return Ok(());
+            }
+            code => bail!(
+                "linking the {} login {} in {name} failed with exit code {code}:\n{}",
+                agent.id,
+                login.file,
+                String::from_utf8_lossy(output.stderr_bytes()).trim()
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Makes `$1/$2` a link to `$3/$2` on the login volume, owned by user `$4`. Paths arrive as
@@ -425,16 +528,22 @@ d="$1"
 while [ "$d" != "$5" ] && [ "$d" != / ]; do chown -h "$4" "$d"; d=$(dirname "$d"); done
 "#;
 
-/// Guest shell script that links the agent's credential file to the login volume.
-fn login_script(login: &Login, home: &str) -> String {
-    // Login paths come from the static agent table, never from user input; `home` is derived
-    // from the stored sandbox user, which msbx set.
-    let mount = login_mount(home);
-    let owner = if home == "/root" { "root" } else { AGENT_USER };
+/// Guest shell script that links one of the agent's login files to the volume mounted at
+/// `mount`, owned by `owner` (the sandbox's user: a name or uid).
+fn login_script(login: &Login, home: &str, mount: &str, owner: &str) -> String {
+    // Login paths come from the static agent table, never from user input; `mount` and `owner`
+    // from the stored config msbx wrote, and `home` is checked to hold no quote.
+    // A file directly in the home has no folder of its own; `$1` must then be the home exactly,
+    // or the ownership loop would climb above it.
+    let dir = if login.dir.is_empty() {
+        home.to_owned()
+    } else {
+        format!("{home}/{}", login.dir)
+    };
     format!(
         "grep -q ' {mount} ' /proc/mounts || exit {LOGIN_NOT_MOUNTED}\n\
-         set -- '{home}/{}' '{}' '{mount}' '{owner}' '{home}'\n{LINK_LOGIN}",
-        login.dir, login.file
+         set -- '{dir}' '{}' '{mount}' '{owner}' '{home}'\n{LINK_LOGIN}",
+        login.file
     )
 }
 
@@ -562,15 +671,101 @@ fn check_identity(
     }
 }
 
-fn host_cpus() -> u8 {
-    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-    u8::try_from(cores).unwrap_or(u8::MAX)
+/// Root's part of the install: the packages, user and Node.js an image may lack (Debian or
+/// Ubuntu, through `apt-get`), then the agent itself. Inputs arrive in the environment.
+const INSTALL_PRELUDE: &str = r#"set -eu
+missing=""
+for package in $MSBX_PACKAGES; do
+  case "$package" in
+    ca-certificates) test -e /etc/ssl/certs/ca-certificates.crt ;;
+    *) command -v "$package" >/dev/null 2>&1 ;;
+  esac || missing="$missing $package"
+done
+if [ -n "$missing" ]; then
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "msbx needs$missing in the image, which has no apt-get" >&2
+    exit 1
+  fi
+  apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $missing
+fi
+# The agent runs as uid 1000: `node` in node images, `ubuntu` in Ubuntu's, else created here.
+if ! getent passwd 1000 >/dev/null 2>&1; then
+  getent group 1000 >/dev/null 2>&1 || groupadd -g 1000 "$MSBX_USER"
+  useradd -m -u 1000 -g 1000 -s /bin/bash "$MSBX_USER"
+fi
+# The login volume's mount point can create the home before the account, owned by root.
+home=$(getent passwd 1000 | cut -d: -f6)
+mkdir -p "$home"
+[ "$(stat -c %u "$home")" = 1000 ] || chown 1000:1000 "$home"
+if [ "$MSBX_NODE" = 1 ] && ! command -v npm >/dev/null 2>&1; then
+  case "$(uname -m)" in
+    x86_64) arch=x64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *) echo "no Node.js build for $(uname -m)" >&2; exit 1 ;;
+  esac
+  file="node-$MSBX_NODE_VERSION-linux-$arch.tar.gz"
+  dir=$(mktemp -d)
+  curl -fsSL -o "$dir/$file" "https://nodejs.org/dist/$MSBX_NODE_VERSION/$file"
+  curl -fsSL -o "$dir/SHASUMS256.txt" "https://nodejs.org/dist/$MSBX_NODE_VERSION/SHASUMS256.txt"
+  (cd "$dir" && grep "  $file\$" SHASUMS256.txt | sha256sum -c -)
+  tar -xzf "$dir/$file" -C /usr/local --strip-components=1 --no-same-owner
+  rm -rf "$dir"
+fi
+"#;
+
+/// The agent user's part of a vendor installer: fetch it, run it, and check that it left `bins`
+/// in `~/.local/bin`. Installers may end by asking to sign in, which fails without a terminal
+/// (Devin's does), so the files decide success, not the installer's exit code.
+fn user_install_script(url: &str, bins: &[&str]) -> String {
+    format!(
+        "set -eu\nscript=$(mktemp)\ncurl -fsSL -o \"$script\" '{url}'\n\
+         bash \"$script\" </dev/null || true\nrm -f \"$script\"\n\
+         for bin in {}; do\n  test -x \"$HOME/.local/bin/$bin\" || \
+         {{ echo \"the installer did not create ~/.local/bin/$bin\" >&2; exit 1; }}\ndone\n",
+        bins.join(" ")
+    )
+}
+
+/// Root links the installer's commands where `msb exec`'s `PATH` finds them, then marks the
+/// install done.
+fn finish_install_script(home: &str, bins: &[&str]) -> String {
+    let mut script = String::from("set -eu\n");
+    for bin in bins {
+        // Writing to a String cannot fail.
+        let _ = writeln!(
+            script,
+            "ln -sfn '{home}/.local/bin/{bin}' '/usr/local/bin/{bin}'"
+        );
+    }
+    let _ = writeln!(script, "touch {INSTALL_MARKER}");
+    script
+}
+
+/// Root's whole script for the agent's own install step, after [`INSTALL_PRELUDE`].
+fn root_install_script(agent: &Agent) -> String {
+    let step = match agent.install {
+        Install::Npm(package) => format!("npm install -g --no-fund --no-audit {package}\n"),
+        Install::Root(script) => format!("{script}\n"),
+        Install::Nothing | Install::Script { .. } => String::new(),
+    };
+    format!("{INSTALL_PRELUDE}{step}")
+}
+
+fn install_packages(agent: &Agent) -> String {
+    agents::BASE_PACKAGES
+        .iter()
+        .chain(agent.packages)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn install_once(
     sandbox: &Sandbox,
     agent: &Agent,
     name: &str,
+    user: &str,
     notify: Notify<'_>,
 ) -> Result<()> {
     let probe = sandbox
@@ -587,26 +782,65 @@ async fn install_once(
         "installing {} in {name} (first run only)...",
         agent.id
     ));
-    let script = format!("set -e\n{}\ntouch {INSTALL_MARKER}", agent.install);
-    // The agent runs unprivileged; installing needs root.
-    let output = sandbox
-        .shell_with(script, |options| options.user("root"))
-        .await
-        .with_context(|| format!("running install script in {name}"))?;
-    if !output.status().success {
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(output.stdout_bytes()),
-            String::from_utf8_lossy(output.stderr_bytes())
-        );
-        bail!(
-            "installing {} in {name} failed with exit code {}:\n{}",
-            agent.id,
-            output.status().code,
-            last_lines(&combined, INSTALL_ERROR_LINES).join("\n")
-        );
+    let packages = install_packages(agent);
+    let node = if matches!(agent.install, Install::Npm(_)) {
+        "1"
+    } else {
+        "0"
+    };
+    // System packages and npm globals need root; the agent itself runs unprivileged.
+    let root = sandbox
+        .shell_with(root_install_script(agent), |options| {
+            options
+                .user("root")
+                .env("MSBX_PACKAGES", packages)
+                .env("MSBX_USER", AGENT_NAME)
+                .env("MSBX_NODE", node)
+                .env("MSBX_NODE_VERSION", agents::NODE_VERSION)
+        })
+        .await;
+    check_install(root, agent, name)?;
+    let bins: &[&str] = match agent.install {
+        Install::Script { url, bins } => {
+            // Vendor installers put the agent in the user's home, as their docs expect.
+            let output = sandbox
+                .shell_with(user_install_script(url, bins), |options| options.user(user))
+                .await;
+            check_install(output, agent, name)?;
+            bins
+        }
+        Install::Nothing | Install::Npm(_) | Install::Root(_) => &[],
+    };
+    // Known only now: an image may have just gained its uid 1000 account.
+    let home = guest_home(sandbox, name, user).await?;
+    let finish = sandbox
+        .shell_with(finish_install_script(&home, bins), |options| {
+            options.user("root")
+        })
+        .await;
+    check_install(finish, agent, name)
+}
+
+fn check_install(
+    output: microsandbox::MicrosandboxResult<microsandbox::sandbox::ExecOutput>,
+    agent: &Agent,
+    name: &str,
+) -> Result<()> {
+    let output = output.with_context(|| format!("running install script in {name}"))?;
+    if output.status().success {
+        return Ok(());
     }
-    Ok(())
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(output.stdout_bytes()),
+        String::from_utf8_lossy(output.stderr_bytes())
+    );
+    bail!(
+        "installing {} in {name} failed with exit code {}:\n{}",
+        agent.id,
+        output.status().code,
+        last_lines(&combined, INSTALL_ERROR_LINES).join("\n")
+    )
 }
 
 fn last_lines(text: &str, count: usize) -> Vec<String> {
@@ -653,23 +887,42 @@ fn info(handle: &SandboxHandle, metrics: Option<&SandboxMetrics>) -> SandboxInfo
     let config = handle.config().ok();
     let spec = config.as_ref().map(|config| &config.spec);
     let configured_memory = spec.map(|spec| u64::from(spec.resources.memory_mib) * 1024 * 1024);
+    let proxied = spec.is_some_and(|spec| {
+        spec.labels.get(LABEL_NETWORK).map(String::as_str) == Some(NETWORK_PROXY)
+    });
     SandboxInfo {
         name: handle.name().to_owned(),
         status: status(handle.status_snapshot()),
         agent: spec.and_then(|spec| spec.labels.get(LABEL_AGENT).cloned()),
         project: spec.and_then(|spec| spec.labels.get(LABEL_PROJECT).map(PathBuf::from)),
         image: spec.map(|spec| image(&spec.image)),
+        created: handle.created_at().map(|time| {
+            time.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        }),
         vcpus: spec.map(|spec| spec.resources.cpus),
         cpu_percent: metrics.map(|metrics| f64::from(metrics.cpu_percent)),
         memory_bytes: metrics.map(|metrics| metrics.memory_bytes),
         memory_limit_bytes: metrics
             .map(|metrics| metrics.memory_limit_bytes)
             .or(configured_memory),
+        disk_used_bytes: metrics.and_then(|metrics| metrics.upper_used_bytes),
+        disk_free_bytes: metrics.and_then(|metrics| metrics.upper_free_bytes),
         uptime: metrics.map(|metrics| metrics.uptime),
         network: spec.map(|spec| network_summary(&spec.network)),
-        proxied: spec.is_some_and(|spec| {
-            spec.labels.get(LABEL_NETWORK).map(String::as_str) == Some(NETWORK_PROXY)
+        proxied,
+        host_ports: spec
+            .filter(|_| proxied)
+            .and_then(|spec| stored_host_ports(&spec.network)),
+        // No user means the image's default user.
+        user: spec.map(|spec| {
+            spec.runtime
+                .user
+                .clone()
+                .unwrap_or_else(|| "image default".to_owned())
         }),
+        restricted: spec.map(|spec| spec.security_profile == SecurityProfile::Restricted),
         git_guarded: spec.is_some_and(|spec| spec.labels.contains_key(LABEL_GIT)),
         rx_bytes: metrics.map(|metrics| metrics.net_rx_bytes),
         tx_bytes: metrics.map(|metrics| metrics.net_tx_bytes),
@@ -708,6 +961,29 @@ fn mount(mount: &VolumeMount) -> String {
         VolumeMount::Named { name, guest, .. } => format!("{name} -> {guest}"),
         other => other.guest().to_owned(),
     }
+}
+
+/// The host ports a stored static policy allows: the port-scoped egress allows to the host
+/// group, without the DNS rule (UDP and TCP 53) every msbx and msb policy carries. `None` when
+/// no policy was stored.
+fn stored_host_ports(network: &NetworkSpec) -> Option<Vec<u16>> {
+    let policy = network.policy.as_ref()?;
+    let dns = [PortRange { start: 53, end: 53 }];
+    let mut ports: Vec<u16> = policy
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.action == Action::Allow
+                && rule.direction != Direction::Ingress
+                && rule.destination == Destination::Group(DestinationGroup::Host)
+                && !rule.ports.is_empty()
+                && !(rule.ports == dns && rule.protocols.contains(&Protocol::Udp))
+        })
+        .flat_map(|rule| rule.ports.iter().flat_map(|range| range.start..=range.end))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    Some(ports)
 }
 
 /// Names the destination groups the policy allows outbound, e.g. `public + host`.
@@ -805,6 +1081,17 @@ async fn get(name: &str) -> Result<SandboxHandle> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::DEFAULT_HOST_PORTS;
+
+    /// What `msbx agent` creates with when `config.toml` is absent, small enough for tests.
+    fn test_options() -> CreateOptions {
+        CreateOptions {
+            image: agents::IMAGE.to_owned(),
+            cpus: 2,
+            memory_mib: 2048,
+            host_ports: DEFAULT_HOST_PORTS.to_vec(),
+        }
+    }
 
     #[expect(
         clippy::needless_pass_by_value,
@@ -814,7 +1101,7 @@ mod tests {
         eprintln!("{note}");
     }
     use crate::agents::AgentId;
-    use microsandbox_types::{NetworkPolicy as StoredPolicy, PortRange, Protocol, Rule};
+    use microsandbox_types::{NetworkPolicy as StoredPolicy, Rule};
 
     fn name_for(folder: &str) -> String {
         sandbox_name(AgentId::Shell.agent(), &Path::new("/work").join(folder))
@@ -955,6 +1242,42 @@ mod tests {
         assert_eq!(network_summary(&network), "disabled");
     }
 
+    /// What create stores: the SDK serialises the built policy into the sandbox spec.
+    fn stored(policy: &NetworkPolicy) -> Result<NetworkSpec> {
+        Ok(NetworkSpec {
+            enabled: true,
+            policy: Some(serde_json::from_value(serde_json::to_value(policy)?)?),
+            ..NetworkSpec::default()
+        })
+    }
+
+    #[test]
+    fn proxied_policy_allows_exactly_the_configured_host_ports() -> Result<()> {
+        let policy = proxied_policy(&[8080, 1234])?;
+        assert_eq!(policy.default_egress, NetworkAction::Deny);
+        assert_eq!(stored_host_ports(&stored(&policy)?), Some(vec![1234, 8080]));
+        assert_eq!(network_summary(&stored(&policy)?), "public");
+
+        // An empty port list would match every port, so no ports means no host rule at all.
+        let closed = proxied_policy(&[])?;
+        assert_eq!(stored_host_ports(&stored(&closed)?), Some(vec![]));
+        let host_rules: Vec<_> = stored(&closed)?
+            .policy
+            .context("stored policy")?
+            .rules
+            .into_iter()
+            .filter(|rule| rule.destination == Destination::Group(DestinationGroup::Host))
+            .collect();
+        assert_eq!(host_rules.len(), 1, "only DNS: {host_rules:?}");
+        assert_eq!(host_rules[0].ports, [PortRange { start: 53, end: 53 }]);
+        Ok(())
+    }
+
+    #[test]
+    fn stored_host_ports_need_a_readable_policy() {
+        assert_eq!(stored_host_ports(&NetworkSpec::default()), None);
+    }
+
     /// The msbx dirs for a VM test, from `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, which must be
     /// set (to temporary folders) so no test touches the real `~/.config/msbx`.
     fn test_dirs() -> Result<crate::paths::Dirs> {
@@ -1008,7 +1331,7 @@ mod tests {
         let project = project.canonicalize()?;
         let agent = AgentId::Shell.agent();
 
-        let created = ensure(agent, &project, &print_note).await;
+        let created = ensure(agent, &project, &test_options(), &print_note).await;
         let outcome = async {
             let name = created?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -1041,28 +1364,41 @@ mod tests {
     static SECRET_AGENT: Agent = Agent {
         id: "secret",
         description: "test agent",
-        install: "true",
+        install: Install::Nothing,
+        packages: &[],
         command: "true",
+        default_args: &[],
+        auto_approve: &[],
         secrets: &[agents::Secret {
             env_var: "MSBX_TEST_SECRET",
-            host: "example.com",
+            hosts: &["example.com"],
         }],
-        login: None,
+        logins: &[],
         models_file: None,
     };
 
     static LOGIN_AGENT: Agent = Agent {
         id: "logintest",
         description: "test agent",
-        install: "true",
+        install: Install::Nothing,
+        packages: &[],
         command: "true",
+        default_args: &[],
+        auto_approve: &[],
         secrets: &[],
-        login: Some(Login {
-            // Two levels, like pi's `.pi/agent`: every folder above the login file must end up
-            // owned by the agent user.
-            dir: ".logintest/agent",
-            file: "auth.json",
-        }),
+        logins: &[
+            Login {
+                // Two levels, like pi's `.pi/agent`: every folder above the login file must end
+                // up owned by the agent user.
+                dir: ".logintest/agent",
+                file: "auth.json",
+            },
+            // Directly in the home, like Claude Code's `~/.claude.json`.
+            Login {
+                dir: "",
+                file: ".logintest.json",
+            },
+        ],
         models_file: Some(".logintest/agent/models.json"),
     };
 
@@ -1077,6 +1413,69 @@ mod tests {
             Some("msbx-login-pi")
         );
         assert_eq!(login_volume(AgentId::Shell.agent()), None);
+        assert_eq!(login_volume(AgentId::Kiro.agent()), None);
+    }
+
+    #[test]
+    fn install_scripts_cover_each_kind_of_install() {
+        let claude = root_install_script(AgentId::Claude.agent());
+        assert!(claude.starts_with(INSTALL_PRELUDE));
+        assert!(
+            claude.ends_with(
+                "npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.314\n"
+            ),
+            "{claude}"
+        );
+        assert!(root_install_script(AgentId::DockerAgent.agent()).contains("sha256sum -c -"));
+        assert_eq!(root_install_script(AgentId::Kiro.agent()), INSTALL_PRELUDE);
+        assert_eq!(
+            install_packages(AgentId::Kiro.agent()),
+            "ca-certificates curl git bash unzip"
+        );
+
+        let user = user_install_script("https://cli.devin.ai/install.sh", &["devin"]);
+        assert!(user.contains("curl -fsSL -o \"$script\" 'https://cli.devin.ai/install.sh'\n"));
+        assert!(
+            user.contains("bash \"$script\" </dev/null || true\n"),
+            "{user}"
+        );
+        assert!(user.contains("for bin in devin; do\n"), "{user}");
+
+        assert_eq!(
+            finish_install_script("/home/node", &["agent", "cursor-agent"]),
+            "set -eu\n\
+             ln -sfn '/home/node/.local/bin/agent' '/usr/local/bin/agent'\n\
+             ln -sfn '/home/node/.local/bin/cursor-agent' '/usr/local/bin/cursor-agent'\n\
+             touch /root/.msbx-installed\n"
+        );
+    }
+
+    /// Every root install script is valid `sh` (parsed, not run: it installs packages).
+    #[cfg(unix)]
+    #[test]
+    fn install_scripts_parse_as_sh() -> Result<()> {
+        for id in <AgentId as clap::ValueEnum>::value_variants() {
+            let agent = id.agent();
+            let mut scripts = vec![
+                root_install_script(agent),
+                finish_install_script("/h", &["x"]),
+            ];
+            if let Install::Script { url, bins } = agent.install {
+                scripts.push(user_install_script(url, bins));
+            }
+            for script in scripts {
+                let output = std::process::Command::new("sh")
+                    .args(["-n", "-c", &script])
+                    .output()?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "{}: {}",
+                    agent.id,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -1152,21 +1551,38 @@ mod tests {
             dir: ".codex",
             file: "auth.json",
         };
-        let script = login_script(&login, "/home/node");
+        let script = login_script(&login, "/home/node", LOGIN_MOUNT, AGENT_USER);
         assert!(
             script.starts_with("grep -q ' /home/node/.msbx-login ' /proc/mounts || exit 3\n"),
             "{script}"
         );
         assert!(
             script.contains(
-                "set -- '/home/node/.codex' 'auth.json' '/home/node/.msbx-login' 'node' '/home/node'\n"
+                "set -- '/home/node/.codex' 'auth.json' '/home/node/.msbx-login' '1000' '/home/node'\n"
             ),
             "{script}"
         );
         assert!(script.ends_with(LINK_LOGIN), "{script}");
 
+        // A file directly in the home: `$1` is the home itself, so no folder above it is chowned.
+        let top = login_script(
+            &Login {
+                dir: "",
+                file: ".claude.json",
+            },
+            "/home/ubuntu",
+            LOGIN_MOUNT,
+            AGENT_USER,
+        );
+        assert!(
+            top.contains(
+                "set -- '/home/ubuntu' '.claude.json' '/home/node/.msbx-login' '1000' '/home/ubuntu'\n"
+            ),
+            "{top}"
+        );
+
         // A sandbox created before the git guard keeps its root paths.
-        let older = login_script(&login, "/root");
+        let older = login_script(&login, "/root", "/root/.msbx-login", "root");
         assert!(
             older
                 .contains("set -- '/root/.codex' 'auth.json' '/root/.msbx-login' 'root' '/root'\n"),
@@ -1175,12 +1591,10 @@ mod tests {
     }
 
     #[test]
-    fn home_follows_the_stored_sandbox_user() {
-        assert_eq!(home_dir(None), "/root");
-        assert_eq!(home_dir(Some("root")), "/root");
-        assert_eq!(home_dir(Some("node")), "/home/node");
-        assert_eq!(home_dir(Some("node:node")), "/home/node");
-        assert_eq!(login_mount("/home/node"), "/home/node/.msbx-login");
+    fn the_login_mount_is_read_from_the_stored_mounts() {
+        let mounts = [("data", "/data"), ("msbx-login-codex", "/root/.msbx-login")];
+        assert_eq!(login_mount_of(mounts), Some("/root/.msbx-login"));
+        assert_eq!(login_mount_of([("data", "/data")]), None);
     }
 
     #[test]
@@ -1207,7 +1621,7 @@ mod tests {
         let volume = login_volume(&LOGIN_AGENT).context("login agent has a volume")?;
         let host_models = models::guest_models_json()?;
 
-        let name = ensure(&LOGIN_AGENT, &project, &print_note).await?;
+        let name = ensure(&LOGIN_AGENT, &project, &test_options(), &print_note).await?;
         // Boxed: the many awaits make this future too large for clippy's stack budget.
         let outcome = Box::pin(async {
             let sandbox = Sandbox::get(&name).await?.connect().await?;
@@ -1217,6 +1631,8 @@ mod tests {
                      test \"$(stat -c %U /home/node/.logintest)\" = node\n\
                      test \"$(stat -c %U /home/node/.logintest/agent)\" = node\n\
                      test \"$(readlink /home/node/.logintest/agent/auth.json)\" = /home/node/.msbx-login/auth.json\n\
+                     test \"$(readlink /home/node/.logintest.json)\" = /home/node/.msbx-login/.logintest.json\n\
+                     test \"$(stat -c %U /home)\" = root\n\
                      echo '{\"first\":1}' > /home/node/.logintest/agent/auth.json\n\
                      test -f /home/node/.msbx-login/auth.json\n\
                      rm /home/node/.logintest/agent/auth.json\n\
@@ -1234,7 +1650,7 @@ mod tests {
             }
 
             // The second ensure moves the fresh sign-in into the volume and restores the link.
-            ensure(&LOGIN_AGENT, &project, &print_note).await?;
+            ensure(&LOGIN_AGENT, &project, &test_options(), &print_note).await?;
             let sandbox = Sandbox::get(&name).await?.connect().await?;
             let second = sandbox
                 .shell(
@@ -1281,7 +1697,7 @@ mod tests {
         std::fs::create_dir_all(&project)?;
         let project = project.canonicalize()?;
 
-        let name = ensure(&SECRET_AGENT, &project, &print_note).await?;
+        let name = ensure(&SECRET_AGENT, &project, &test_options(), &print_note).await?;
         let outcome = async {
             let handle = Sandbox::get(&name).await?;
             let stored = format!(
@@ -1320,10 +1736,13 @@ mod tests {
     static NET_AGENT: Agent = Agent {
         id: "nettest",
         description: "test agent",
-        install: "true",
+        install: Install::Nothing,
+        packages: &[],
         command: "true",
+        default_args: &[],
+        auto_approve: &[],
         secrets: &[],
-        login: None,
+        logins: &[],
         models_file: None,
     };
 
@@ -1345,10 +1764,13 @@ mod tests {
     static GUARD_AGENT: Agent = Agent {
         id: "guardtest",
         description: "git guard test agent",
-        install: "apt-get update && apt-get install -y --no-install-recommends git",
+        install: Install::Nothing,
+        packages: &[],
         command: "true",
+        default_args: &[],
+        auto_approve: &[],
         secrets: &[],
-        login: None,
+        logins: &[],
         models_file: None,
     };
 
@@ -1397,7 +1819,7 @@ mod tests {
             anyhow::ensure!(output.status.success(), "git {args:?} failed");
         }
 
-        let created = ensure(&GUARD_AGENT, &project, &print_note).await;
+        let created = ensure(&GUARD_AGENT, &project, &test_options(), &print_note).await;
         let outcome = Box::pin(async {
             let name = created?;
             let config = Sandbox::get(&name).await?.config()?;
@@ -1504,7 +1926,7 @@ mod tests {
             .join("proj");
         std::fs::create_dir_all(&project)?;
         let project = project.canonicalize()?;
-        let name = ensure(&NET_AGENT, &project, &print_note).await?;
+        let name = ensure(&NET_AGENT, &project, &test_options(), &print_note).await?;
         let outcome = Box::pin(async {
             let config = Sandbox::get(&name).await?.config()?;
             let stored = config.spec.network.policy.context("policy stored")?;

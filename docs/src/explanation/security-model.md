@@ -18,8 +18,9 @@ and [security policy](https://github.com/superradcompany/microsandbox/blob/main/
 - Network access follows your policy (see below). With the `open` preset the VM can reach the
   public internet and send project contents anywhere. With any preset, an allowed host can
   still receive data.
-- Host services: only ports 11434 (Ollama) and 1234 (LM Studio) at
-  `host.microsandbox.internal`, fixed when the sandbox is created.
+- Host services: only the host ports in `policy.toml` at `host.microsandbox.internal` (by
+  default 11434 for Ollama and 1234 for LM Studio), fixed when the sandbox is created. Each
+  port you add exposes that Mac service to every sandbox created afterwards.
 - TLS is intercepted when secrets are used. To substitute keys, microsandbox adds a local CA
   to the VM's trust store and terminates TLS on the host. Agents that pin certificates may fail.
 - Secret values live on the host, in memory and possibly in microsandbox's host-side sandbox
@@ -46,7 +47,7 @@ What it does not stop:
 
 - DNS: the sandbox can resolve any name through microsandbox's gateway.
 - Data leaving through an allowed host, such as `github.com` under `balanced`.
-- Host access beyond the two model ports being fixed at create; the proxy cannot change it,
+- Host access to the configured host ports, fixed at create; the proxy cannot change it,
   because traffic to your machine bypasses the proxy.
 - Traffic with no name in its first bytes (plain TCP, or a server-first protocol such as
   SSH) is decided by the address alone.
@@ -57,18 +58,20 @@ The proxy binds loopback only, never logs payloads or credentials, and its log h
 names, ports, counts and times in `~/.local/state/msbx/network-log.json`. The unauthenticated
 status request reveals the msbx version, pid and policy path to local processes.
 
-## Keychain keys
+## Keychain and Secret Service keys
 
-`msbx secret set` stores an API key in the macOS Keychain through Apple's `security` tool,
-which prompts for the value; msbx never reads it on that path. At startup msbx reads each
-unset secret with `security find-generic-password` and runs itself again with the value in its
-environment, where microsandbox's secret proxy picks it up. The value is not printed, logged,
+`msbx secret set` stores an API key in the macOS Keychain through Apple's `security` tool, or
+on Linux in the Secret Service through `secret-tool`; either prompts for the value, and msbx
+never reads it on that path. At startup msbx reads each unset secret back with the same tool
+and runs itself again with the value in its environment, where microsandbox's secret proxy
+picks it up. The value is not printed, logged,
 put in an error message or passed on a command line. The first time, macOS may ask whether
 `security` may read the item.
 
 ## Shared sign-ins
 
-Codex and pi sign-ins (the `auth.json` each writes) are kept on one named volume per agent,
+Agent sign-ins (the files listed on the [Agents](../reference/agents.md#credentials) page) are
+kept on one named volume per agent,
 `msbx-login-<agent>`, and linked into every sandbox of that agent. See
 [RFC 0004](../rfcs/0004-shared-logins.md) for the design and its risk table. In short:
 
@@ -78,7 +81,18 @@ Codex and pi sign-ins (the `auth.json` each writes) are kept on one named volume
   before linking.
 - The token is plain JSON under `~/.microsandbox/volumes/msbx-login-<agent>/` on the host,
   readable only by your user account.
-- Only the sign-in file is shared. Config, sessions and history stay in each sandbox.
+- Only the sign-in files are shared. Config, sessions and history stay in each sandbox, except
+  Claude Code's `~/.claude.json`, which holds its account next to settings and per-project
+  history, so those are shared between Claude sandboxes too.
+
+## Agents run without permission prompts
+
+Like Docker Sandboxes, msbx starts each agent with its flag that skips permission prompts
+(`claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`,
+and so on; see [Agents](../reference/agents.md)). The agent can then run any command in the VM
+without asking. What limits it is everything on this page: the VM, the network policy, the git
+guard and keys that never enter the VM. Turn the flag off per agent with `auto_approve = false`
+in `config.toml` when you want the agent's own prompts as well.
 
 ## Local models for pi
 
@@ -93,7 +107,7 @@ scripts in `.git/hooks/` (or the `core.hooksPath` directory), and settings such 
 aliases in `.git/config`. Cursor shipped this as CVE-2026-26268. msbx closes it in three layers
 ([RFC 0001](../rfcs/0001-git-safety.md), [how-to](../how-to/guard-git.md)):
 
-- In new sandboxes the agent runs as the unprivileged user `node` under microsandbox's
+- In new sandboxes the agent runs as the unprivileged uid 1000 (`node`) under microsandbox's
   `restricted` profile (`no_new_privs`, no `CAP_SYS_ADMIN` even for root). `.git` is its own
   read-write mount, and `.git/hooks`, `.git/info`, `.git/config`, `.git/config.worktree`,
   `.git/objects/info/alternates`, a `.git` pointer file, and any `core.hooksPath` or
