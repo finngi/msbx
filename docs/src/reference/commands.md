@@ -27,9 +27,9 @@ Starts (creating if needed) the agent's sandbox for a folder and attaches to the
 
 | Argument | Meaning |
 |---|---|
-| `AGENT` | `codex`, `pi` or `shell` |
+| `AGENT` | `claude`, `codex`, `copilot`, `cursor`, `devin`, `docker-agent`, `droid`, `gemini`, `kiro`, `opencode`, `pi` or `shell` ([Agents](agents.md)) |
 | `PATH` | Project folder to mount at the same path inside the sandbox. Default: the current directory. |
-| `ARGS` | Arguments passed to the agent, after `--`. Not allowed with `-d`. |
+| `ARGS` | Arguments for the agent, after `--`: added after its defaults when the first starts with `-`; a first word drops the defaults ([Launching](agents.md#launching)). Not allowed with `-d`. |
 | `-d`, `--detach` | Create or start the sandbox, but don't attach. |
 
 Behaviour:
@@ -41,34 +41,32 @@ Behaviour:
    characters outside `a-z0-9` becomes one `-`, and the name is cut to 128 bytes.
 3. If a sandbox with that name exists for the same folder, it is started if needed and reused.
    If it exists for a different folder, or was not created by msbx, msbx stops with an error.
-4. Otherwise it is created with the [sandbox defaults](sandbox-defaults.md), including the proxy
-   and the git guard mounts.
-5. On first use the agent is installed in the VM as root (a marker file, `/root/.msbx-installed`,
-   records that it is done). A sandbox created before the git guard gets a `note:` saying the
-   agent runs as root there.
-6. For `codex` and `pi`, the agent's sign-in file is linked to the volume `msbx-login-<agent>`,
-   mounted at `~/.msbx-login` in the agent user's home (created when missing, 16 MiB,
-   `noexec`). A plain file the agent left at that path is moved onto the volume first. A
-   sandbox created without the volume gets a `note:` and no link.
+4. Otherwise it is created with the [sandbox defaults](sandbox-defaults.md) and
+   `config.toml`'s image, CPUs and memory, including the proxy and the git guard mounts.
+5. On first use the agent is installed in the VM ([First-use install](sandbox-defaults.md#first-use-install);
+   a marker file, `/root/.msbx-installed`, records that it is done). A sandbox created before the
+   git guard gets a `note:` saying the agent runs as root there.
+6. For agents with a shared sign-in, each sign-in file is linked to the volume
+   `msbx-login-<agent>`, mounted at `/home/node/.msbx-login` (created when missing, 16 MiB,
+   `noexec`; older sandboxes have it under their user's home). A plain file the agent left at
+   that path is moved onto the volume first. A sandbox created without the volume gets a
+   `note:` and no link.
 7. For `pi`, `~/.pi/agent/models.json` is written from the host's local model servers (see
    [Reach Ollama or LM Studio](../how-to/reach-host-models.md)). The VM's global git identity
    is set from your Mac's when it has none.
 8. msbx fingerprints the project's git hooks, config and pointer files, warns if they changed
    since the last session started, and stores the new baseline under
    `~/.local/state/msbx/git-guard/<name>.json` ([Keep git safe](../how-to/guard-git.md)).
-9. msbx runs `msb exec -t <name> -- <command> <ARGS>` on your terminal, as the sandbox's user
-   (`node` in new sandboxes), and exits with its exit code. First it prints a warning if the
+9. msbx runs `msb exec -t <name> -- <command> <defaults> <ARGS>` on your terminal, as the
+   sandbox's user (uid 1000 in new sandboxes), and exits with its exit code. First it prints a warning if the
    git files changed during the session.
 
-Before step 1, msbx runs itself again once with the proxy token (`MSBX_PROXY_TOKEN`) and, on
-macOS, each agent secret that is unset or empty in the environment and present in the Keychain
-(`msbx secret`) added to its environment, and continues from there.
+Before step 1, msbx reads [`config.toml`](sandbox-defaults.md#config-file) and stops on an
+error in it. Then it runs itself again once with the proxy token (`MSBX_PROXY_TOKEN`) and each
+agent secret that is unset or empty in the environment and present in the Keychain or Secret
+Service (`msbx secret`) added to its environment, and continues from there.
 
-| Agent | Command in the VM | Installed on first use | Host-side secret | Shared sign-in file |
-|---|---|---|---|---|
-| `codex` | `codex` | `@openai/codex@0.148.0`, `git`, `ca-certificates` | `OPENAI_API_KEY`, sent only to `api.openai.com` | `~/.codex/auth.json` |
-| `pi` | `pi` | `@earendil-works/pi-coding-agent@1.4.0`, `git`, `ca-certificates` | none | `~/.pi/agent/auth.json` |
-| `shell` | `bash` | `git`, `curl`, `ca-certificates` | none | none |
+What each agent installs, runs and forwards is on the [Agents](agents.md) page.
 
 ## `msbx secret`
 
@@ -77,17 +75,25 @@ msbx secret set <VAR>
 msbx secret rm <VAR>
 ```
 
-Stores or removes an agent API key in the macOS Keychain, as a generic password with service
-`msbx` and account `VAR`. `VAR` must be a secret the agent table forwards; today that is only
-`OPENAI_API_KEY`. Any other name is a usage error that lists the valid names.
+Stores or removes an agent API key. `VAR` must be a variable the agent table forwards (see
+[Agents](agents.md#credentials)); any other name is a usage error that lists the valid names.
 
-`set` runs `security add-generic-password -U -s msbx -a VAR -w` on your terminal, so `security`
-prompts for the value and msbx never reads it. `rm` runs `security delete-generic-password -s
-msbx -a VAR`. Both exit with `security`'s exit code (44 when there is no such item).
+On macOS the key goes in the Keychain, as a generic password with service `msbx` and account
+`VAR`. `set` runs `security add-generic-password -U -s msbx -a VAR -w` on your terminal, so
+`security` prompts for the value and msbx never reads it. `rm` runs `security
+delete-generic-password -s msbx -a VAR`. Both exit with `security`'s exit code (44 when there
+is no such item).
+
+On Linux the key goes in the freedesktop Secret Service (GNOME Keyring, KWallet, KeePassXC)
+through libsecret's `secret-tool`, with the attributes `service msbx` and `account VAR`: `set`
+runs `secret-tool store --label="msbx VAR" service msbx account VAR`, which prompts for the
+value, and `rm` runs `secret-tool clear service msbx account VAR`. Without `secret-tool` on
+`PATH` (Debian and Ubuntu: `libsecret-tools`), both stop with an error; export the variable
+instead.
 
 When `msbx` or `msbx agent` starts, each secret var that is not set (or is empty) in the shell
-is read with `security find-generic-password -s msbx -a VAR -w`. A shell variable always wins.
-On Linux, or when `security` is missing, nothing is looked up.
+is read with `security find-generic-password -s msbx -a VAR -w` or `secret-tool lookup service
+msbx account VAR`. A shell variable always wins.
 
 ## `msbx policy`
 

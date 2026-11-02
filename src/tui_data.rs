@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 use clap::ValueEnum;
 
-use crate::agents::{Agent, AgentId};
+use crate::agents::{self, Agent, AgentId};
 use crate::model::{NetEntry, RuleInfo};
 use crate::netlog::{self, Entry, Log};
 use crate::paths::Dirs;
@@ -153,26 +153,32 @@ pub(crate) async fn credentials() -> Vec<String> {
     let mut summaries = Vec::new();
     for id in AgentId::value_variants() {
         let agent = id.agent();
-        let api_key = agent
-            .secrets
-            .iter()
-            .all(|secret| std::env::var_os(secret.env_var).is_some_and(|value| !value.is_empty()));
+        let (set, _) = agents::select_secrets(agent, |var| std::env::var(var).ok());
+        let set: Vec<&str> = set.iter().map(|secret| secret.env_var).collect();
         summaries.push(credential_summary(
             agent,
-            api_key,
+            &set,
             sandbox::shared_login(agent).await,
         ));
     }
     summaries
 }
 
-fn credential_summary(agent: &Agent, api_key: bool, login: Result<Option<bool>>) -> String {
+/// Where `msbx secret set` keeps values on this platform, after the shell.
+const STORE: &str = if cfg!(target_os = "macos") {
+    "shell/Keychain"
+} else {
+    "shell/Secret Service"
+};
+
+/// `set` names the agent's vars that hold a value; any one of them is enough.
+fn credential_summary(agent: &Agent, set: &[&str], login: Result<Option<bool>>) -> String {
     let mut parts = Vec::new();
-    if !agent.secrets.is_empty() {
-        parts.push(format!(
-            "OPENAI_API_KEY: {} (shell/Keychain)",
-            if api_key { "available" } else { "missing" }
-        ));
+    if !set.is_empty() {
+        parts.push(format!("{}: available ({STORE})", set.join(", ")));
+    } else if !agent.secrets.is_empty() {
+        let vars: Vec<&str> = agent.secrets.iter().map(|secret| secret.env_var).collect();
+        parts.push(format!("{}: missing", vars.join(" or ")));
     }
     if let Some(volume) = sandbox::login_volume(agent) {
         let state = match login {
@@ -183,7 +189,7 @@ fn credential_summary(agent: &Agent, api_key: bool, login: Result<Option<bool>>)
         parts.push(format!("{volume}: {state}"));
     }
     if parts.is_empty() {
-        "no credentials required".to_owned()
+        "no keys or shared sign-in".to_owned()
     } else {
         parts.join("; ")
     }
@@ -215,21 +221,35 @@ mod tests {
     #[test]
     fn credentials_distinguish_availability_missing_unknown_and_none() {
         let codex = AgentId::Codex.agent();
-        let available = credential_summary(codex, true, Ok(Some(true)));
-        assert!(available.contains("OPENAI_API_KEY: available (shell/Keychain)"));
+        let available = credential_summary(codex, &["OPENAI_API_KEY"], Ok(Some(true)));
+        assert!(available.contains(&format!("OPENAI_API_KEY: available ({STORE})")));
         assert!(available.contains("msbx-login-codex: present"));
-        assert!(credential_summary(codex, false, Ok(Some(false))).contains("missing"));
+        assert!(credential_summary(codex, &[], Ok(Some(false))).contains("missing"));
         assert!(
             credential_summary(
                 AgentId::Pi.agent(),
-                false,
+                &[],
                 Err(anyhow::anyhow!("unavailable"))
             )
             .contains("unknown")
         );
         assert_eq!(
-            credential_summary(AgentId::Shell.agent(), false, Ok(None)),
-            "no credentials required"
+            credential_summary(AgentId::Shell.agent(), &[], Ok(None)),
+            "no keys or shared sign-in"
+        );
+        assert_eq!(
+            credential_summary(AgentId::Kiro.agent(), &[], Ok(None)),
+            "no keys or shared sign-in"
+        );
+        // Any one var is enough; several are named in the table's order.
+        let copilot = AgentId::Copilot.agent();
+        assert_eq!(
+            credential_summary(copilot, &[], Ok(Some(false))),
+            "COPILOT_GITHUB_TOKEN or GH_TOKEN or GITHUB_TOKEN: missing; msbx-login-copilot: missing"
+        );
+        assert!(
+            credential_summary(copilot, &["GH_TOKEN", "GITHUB_TOKEN"], Ok(Some(false)))
+                .starts_with("GH_TOKEN, GITHUB_TOKEN: available")
         );
     }
 

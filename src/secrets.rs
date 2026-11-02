@@ -1,63 +1,130 @@
 //! Host-side values the SDK reads from msbx's environment when it boots a VM: agent API keys
-//! from the macOS Keychain (through Apple's `security` CLI) and the network proxy token.
+//! from the macOS Keychain (through Apple's `security` CLI) or, on Linux, the freedesktop Secret
+//! Service (through libsecret's `secret-tool`, when it is installed), and the network proxy token.
 //!
 //! The SDK and `msb` resolve a secret or proxy password with `std::env::var` at spawn time, so
 //! a value must be in that environment first. Rust 2024 makes `std::env::set_var` unsafe (and
 //! this crate forbids `unsafe`), so msbx re-runs itself once with the values added to the
 //! child's environment instead. The values are never printed, logged or passed as arguments;
-//! `msbx secret set` lets `security` prompt for the value, so msbx never sees it.
+//! `msbx secret set` lets `security` or `secret-tool` prompt for the value, so msbx never sees it.
 
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::paths::Dirs;
 use crate::{agents, proxy};
 
-/// Keychain service name; the env var is the account.
+/// Keychain service name, and Secret Service `service` attribute; the env var is the account.
 const SERVICE: &str = "msbx";
+
+/// Where `msbx secret` keeps values on this host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Store {
+    /// macOS Keychain, through `/usr/bin/security`.
+    Keychain,
+    /// freedesktop Secret Service (GNOME Keyring, `KWallet`, `KeePassXC`), through `secret-tool`.
+    SecretService,
+}
+
+impl Store {
+    /// The Keychain on macOS; the Secret Service on other Unixes when `secret-tool` is on `PATH`.
+    fn find() -> Option<Self> {
+        if cfg!(target_os = "macos") {
+            return Some(Self::Keychain);
+        }
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .any(|dir| dir.join("secret-tool").is_file())
+            .then_some(Self::SecretService)
+    }
+
+    fn program(self) -> &'static str {
+        match self {
+            Self::Keychain => "security",
+            Self::SecretService => "secret-tool",
+        }
+    }
+
+    fn set_args(self, var: &str) -> Vec<String> {
+        match self {
+            // `-w` last and without a value makes `security` prompt for it.
+            Self::Keychain => {
+                strings(&["add-generic-password", "-U", "-s", SERVICE, "-a", var, "-w"])
+            }
+            // `store` reads the value from the terminal (or stdin) itself.
+            Self::SecretService => strings(&[
+                "store",
+                &format!("--label=msbx {var}"),
+                "service",
+                SERVICE,
+                "account",
+                var,
+            ]),
+        }
+    }
+
+    fn rm_args(self, var: &str) -> Vec<String> {
+        match self {
+            Self::Keychain => strings(&["delete-generic-password", "-s", SERVICE, "-a", var]),
+            Self::SecretService => strings(&["clear", "service", SERVICE, "account", var]),
+        }
+    }
+
+    fn find_args(self, var: &str) -> Vec<String> {
+        match self {
+            Self::Keychain => strings(&["find-generic-password", "-s", SERVICE, "-a", var, "-w"]),
+            Self::SecretService => strings(&["lookup", "service", SERVICE, "account", var]),
+        }
+    }
+}
+
+fn strings(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| (*arg).to_owned()).collect()
+}
+
+fn store() -> Result<Store> {
+    let Some(store) = Store::find() else {
+        bail!(
+            "no key store: install secret-tool (Debian/Ubuntu: libsecret-tools, Fedora: \
+             libsecret) with a Secret Service such as GNOME Keyring, or export the variable instead"
+        );
+    };
+    Ok(store)
+}
 
 /// Set in the re-run's environment so a second run never re-execs again.
 const RESOLVED_GUARD: &str = "MSBX_ENV_RESOLVED";
 
-/// `msbx secret set VAR`: `security` prompts for the value on the terminal. Returns its exit code.
+/// `msbx secret set VAR`: the store's CLI prompts for the value on the terminal. Returns its
+/// exit code.
 pub(crate) fn set(var: &str) -> Result<u8> {
-    run_security(&set_args(var))
+    let store = store()?;
+    run_store(store, &store.set_args(var))
 }
 
-/// `msbx secret rm VAR`. Returns `security`'s exit code (44 when there is no such item).
+/// `msbx secret rm VAR`. Returns the store CLI's exit code (`security`: 44 when there is no such
+/// item).
 pub(crate) fn rm(var: &str) -> Result<u8> {
-    run_security(&rm_args(var))
+    let store = store()?;
+    run_store(store, &store.rm_args(var))
 }
 
-fn run_security(args: &[&str]) -> Result<u8> {
-    let status = Command::new("security")
+fn run_store(store: Store, args: &[String]) -> Result<u8> {
+    let status = Command::new(store.program())
         .args(args)
         .status()
-        .context("running security (the macOS Keychain CLI)")?;
+        .with_context(|| format!("running {}", store.program()))?;
     Ok(status
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
 }
 
-fn set_args(var: &str) -> [&str; 7] {
-    // `-w` last and without a value makes `security` prompt for it (`add-generic-password -h`).
-    ["add-generic-password", "-U", "-s", SERVICE, "-a", var, "-w"]
-}
-
-fn rm_args(var: &str) -> [&str; 5] {
-    ["delete-generic-password", "-s", SERVICE, "-a", var]
-}
-
-fn find_args(var: &str) -> [&str; 6] {
-    ["find-generic-password", "-s", SERVICE, "-a", var, "-w"]
-}
-
-/// Re-runs msbx with the proxy token and, on macOS, Keychain values for every agent secret var
-/// that is unset or empty in the environment. Returns normally when there is nothing to add;
+/// Re-runs msbx with the proxy token and stored values (Keychain or Secret Service) for every
+/// agent secret var that is unset or empty in the environment. Returns normally when there is nothing to add;
 /// on success it never returns. A shell variable always wins.
 pub(crate) fn resolve_environment(dirs: &Dirs) -> Result<()> {
     if std::env::var_os(RESOLVED_GUARD).is_some() {
@@ -65,11 +132,11 @@ pub(crate) fn resolve_environment(dirs: &Dirs) -> Result<()> {
     }
     let lookup = |var: &str| std::env::var(var).ok();
     let mut found: Vec<(&str, String)> = Vec::new();
-    if cfg!(target_os = "macos") {
+    if let Some(store) = Store::find() {
         found.extend(
             missing_vars(&agents::secret_vars(), lookup)
                 .into_iter()
-                .filter_map(|var| Some((var, keychain_value(var)?))),
+                .filter_map(|var| Some((var, stored_value(store, var)?))),
         );
     }
     if !missing_vars(&[proxy::TOKEN_VAR], lookup).is_empty() {
@@ -100,11 +167,11 @@ fn missing_vars<'a>(vars: &[&'a str], lookup: impl Fn(&str) -> Option<String>) -
         .collect()
 }
 
-/// The Keychain item for `var`, or `None` when there is none, it is empty, or `security`
+/// The stored item for `var`, or `None` when there is none, it is empty, or the store's CLI
 /// cannot run. Its stderr is dropped so a missing item stays silent.
-fn keychain_value(var: &str) -> Option<String> {
-    let output = Command::new("security")
-        .args(find_args(var))
+fn stored_value(store: Store, var: &str) -> Option<String> {
+    let output = Command::new(store.program())
+        .args(store.find_args(var))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -118,7 +185,8 @@ fn keychain_value(var: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// `security -w` prints the value followed by one newline; values keep any other whitespace.
+/// `security -w` prints the value followed by one newline (`secret-tool lookup` adds one only on a
+/// terminal); values keep any other whitespace.
 fn trim_newline(mut value: String) -> String {
     if value.ends_with('\n') {
         value.pop();
@@ -146,6 +214,9 @@ mod tests {
 
     #[test]
     fn security_arguments_name_the_service_and_account() {
+        let set_args = |var| Store::Keychain.set_args(var);
+        let rm_args = |var| Store::Keychain.rm_args(var);
+        let find_args = |var| Store::Keychain.find_args(var);
         assert_eq!(
             set_args("OPENAI_API_KEY"),
             [
@@ -178,6 +249,31 @@ mod tests {
                 "OPENAI_API_KEY",
                 "-w"
             ]
+        );
+    }
+
+    #[test]
+    fn secret_tool_arguments_use_service_and_account_attributes() {
+        let store = Store::SecretService;
+        assert_eq!(store.program(), "secret-tool");
+        assert_eq!(
+            store.set_args("GH_TOKEN"),
+            [
+                "store",
+                "--label=msbx GH_TOKEN",
+                "service",
+                "msbx",
+                "account",
+                "GH_TOKEN"
+            ]
+        );
+        assert_eq!(
+            store.rm_args("GH_TOKEN"),
+            ["clear", "service", "msbx", "account", "GH_TOKEN"]
+        );
+        assert_eq!(
+            store.find_args("GH_TOKEN"),
+            ["lookup", "service", "msbx", "account", "GH_TOKEN"]
         );
     }
 

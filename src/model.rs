@@ -78,6 +78,16 @@ pub(crate) struct RuleInfo {
     pub(crate) allowed: bool,
 }
 
+/// What a new sandbox is created with (RFC 0012). An existing sandbox keeps its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreateOptions {
+    pub(crate) image: String,
+    pub(crate) cpus: u8,
+    pub(crate) memory_mib: u32,
+    /// Mac ports the sandbox may reach, from `policy.toml` (RFC 0011).
+    pub(crate) host_ports: Vec<u16>,
+}
+
 /// The canonical msbx spelling also produced by `sandbox::sandbox_name`.
 pub(crate) fn validate_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 128 {

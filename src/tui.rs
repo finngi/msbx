@@ -25,7 +25,7 @@ use crate::model::SandboxInfo;
 use crate::paths::Dirs;
 use crate::policy::{self, Policy, Preset, Target};
 use crate::tui_data::{self, NetworkData, read_network};
-use crate::{attach, guard, proxy, sandbox, ui};
+use crate::{attach, config, guard, proxy, sandbox, ui};
 
 /// Redraws happen at most this often, and only when something changed.
 const FRAME: Duration = Duration::from_millis(33);
@@ -287,12 +287,16 @@ pub(crate) async fn run(project: PathBuf, home: Option<PathBuf>, dirs: Dirs) -> 
     run_app(app, dirs, RunMode::Live).await
 }
 
-fn new_app(project: PathBuf, home: Option<PathBuf>) -> App {
-    let agents = AgentId::value_variants()
+/// Every agent id in table order, as the create wizard lists them.
+pub(crate) fn agent_ids() -> Vec<&'static str> {
+    AgentId::value_variants()
         .iter()
         .map(|id| id.agent().id)
-        .collect();
-    let mut app = App::new(project, home, agents, preview_name);
+        .collect()
+}
+
+fn new_app(project: PathBuf, home: Option<PathBuf>) -> App {
+    let mut app = App::new(project, home, agent_ids(), preview_name);
     app.no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
     app
 }
@@ -659,8 +663,10 @@ async fn create(
     notify: sandbox::Notify<'_>,
 ) -> Result<String> {
     let policy = policy::load(&dirs.policy_file())?.context("network policy is not initialised")?;
+    let config = config::load(&dirs.config_file())?;
+    let options = config.create_options(agent, policy.host_ports, config::host_memory_mib());
     proxy::ensure_running(dirs).await?;
-    sandbox::ensure_named(agent, project, name, &policy.host_ports, notify).await
+    sandbox::ensure_named(agent, project, name, &options, notify).await
 }
 
 /// A started sandbox dials the proxy at once, so make sure one is there first.
@@ -722,21 +728,23 @@ async fn suspend(
 }
 
 async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
-    let (name, command, project) = match foreground {
+    let (name, command, args, project) = match foreground {
         Foreground::Attach {
             name,
             agent,
             project,
         } => {
+            // Read at each attach, so an edit to the agent's arguments applies without recreating.
+            let args = config::load(&dirs.config_file())?.launch_args(agent, &[]);
             proxy::ensure_running(dirs).await?;
             sandbox::prepare_existing(&name, agent, &|note| eprintln!("{note}")).await?;
-            (name, agent.command, project)
+            (name, agent.command, args, project)
         }
         Foreground::Exec {
             name,
             command,
             project,
-        } => (name, command, project),
+        } => (name, command, Vec::new(), project),
     };
     // The terminal is the agent's now, so warnings go to stderr like `msbx agent`'s; the status
     // line and the card's badge repeat them once the dashboard is back (RFC 0001).
@@ -750,7 +758,7 @@ async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
         }
         None => None,
     };
-    let code = attach::exec(&name, command, &[]).await?;
+    let code = attach::exec(&name, command, &args).await?;
     let mut status = format!("exited {name} (code {code})");
     if let Some(warning) = session
         .map(|session| session.finish())
@@ -1034,7 +1042,7 @@ mod tests {
             },
             sandbox("pi-notes", Some("pi")),
             sandbox("foreign", None),
-            sandbox("future", Some("claude")),
+            sandbox("future", Some("amp")),
         ]
     }
 
@@ -1347,7 +1355,7 @@ mod tests {
         for (sandbox, message) in [
             ("foreign", "sandbox foreign has no msbx agent"),
             ("gone", "sandbox gone has no msbx agent"),
-            ("future", "sandbox future has unknown agent claude"),
+            ("future", "sandbox future has unknown agent amp"),
         ] {
             let error = step_for(Action::Attach {
                 name: name(sandbox),
@@ -1390,13 +1398,13 @@ mod tests {
             "creating stays on the dashboard; ↵ attaches later"
         );
         let unknown = step_for(Action::Create {
-            agent: name("claude"),
+            agent: name("amp"),
             project,
-            name: name("claude-custom"),
+            name: name("amp-custom"),
         });
         assert_eq!(
             unknown.err().map(|error| error.to_string()).as_deref(),
-            Some("unknown agent claude")
+            Some("unknown agent amp")
         );
         Ok(())
     }
@@ -1417,7 +1425,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(preview_name("claude", Path::new("/work/api")), "");
+        assert_eq!(preview_name("amp", Path::new("/work/api")), "");
     }
 
     #[test]

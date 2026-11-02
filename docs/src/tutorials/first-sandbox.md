@@ -82,5 +82,5 @@ msbx
 - Only the project folder is shared with the VM.
 - The dashboard attaches, starts, stops and removes sandboxes.
 
-Next: [run Codex or pi in a project](../how-to/run-codex-or-pi.md), and read the
+Next: [run an agent in a project](../how-to/run-codex-or-pi.md), and read the
 [security model](../explanation/security-model.md) before you point an agent at real work.

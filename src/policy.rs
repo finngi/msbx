@@ -17,14 +17,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::agents;
 
-/// Hosts the `balanced` preset allows besides each agent's secret host (`agents.rs`): Codex
-/// sign-in and `ChatGPT` mode (Codex 0.148.0 `login/src/server.rs` `DEFAULT_ISSUER`,
-/// `model-provider-info/src/lib.rs` `CHATGPT_CODEX_BASE_URL`, `http-client/src/chatgpt_hosts.rs`),
-/// then the package sources the install scripts and common toolchains use, and GitHub.
-pub(crate) const BALANCED_BASELINE: [&str; 18] = [
+/// Hosts the `balanced` preset allows besides each agent's secret hosts (`agents.rs`): what the
+/// agents' installs and sign-ins reach (RFC 0012 lists the source for each), then the package
+/// sources common toolchains use, and GitHub.
+pub(crate) const BALANCED_BASELINE: [&str; 38] = [
+    // Codex sign-in and ChatGPT mode (Codex 0.148.0 `login/src/server.rs` `DEFAULT_ISSUER`,
+    // `model-provider-info/src/lib.rs` `CHATGPT_CODEX_BASE_URL`).
     "auth.openai.com",
     "chatgpt.com",
     "**.chatgpt.com",
+    // Claude Code sign-in (https://code.claude.com/docs/en/network-config).
+    "claude.ai",
+    "platform.claude.com",
+    "console.anthropic.com",
+    // Gemini CLI's Google sign-in: Google OAuth and the Code Assist API it then calls.
+    "accounts.google.com",
+    "oauth2.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+    // Copilot's API for every plan, and GitHub device sign-in (github.com below).
+    "**.githubcopilot.com",
+    // Cursor's installer, download and API hosts (https://cursor.com/install).
+    "cursor.com",
+    "downloads.cursor.com",
+    "**.cursor.sh",
+    // Devin's installer, downloads and sign-in (cli.devin.ai/install.sh, the devin binary).
+    "cli.devin.ai",
+    "static.devin.ai",
+    "app.devin.ai",
+    "api.devin.ai",
+    // Kiro's installer and downloads (https://cli.kiro.dev/install); its sign-in hosts are not
+    // documented, see `msbx policy log`.
+    "cli.kiro.dev",
+    "prod.download.cli.kiro.dev",
+    // Droid sign-in (WorkOS hosts in the droid 1.0.0 binary).
+    "api.workos.com",
+    "auth.workos.com",
+    // OpenCode's model list.
+    "models.dev",
+    // Node.js for images without npm.
+    "nodejs.org",
     "registry.npmjs.org",
     "deb.debian.org",
     "security.debian.org",
@@ -434,11 +465,18 @@ pub(crate) struct Policy {
 static BASELINE: LazyLock<Vec<Target>> = LazyLock::new(|| {
     // The table is a constant checked by `baseline_targets_parse`, so a bad entry cannot
     // reach a user without failing the tests.
-    agents::secret_hosts()
+    let mut targets: Vec<Target> = Vec::new();
+    for target in agents::secret_hosts()
         .into_iter()
         .chain(BALANCED_BASELINE)
         .filter_map(|host| Target::parse(host).ok())
-        .collect()
+    {
+        // A secret host may also be an install or sign-in host; list each rule once.
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
 });
 
 impl Policy {
@@ -921,9 +959,21 @@ mod tests {
         {
             target(host);
         }
+        let mut unique: Vec<&str> = BALANCED_BASELINE
+            .iter()
+            .copied()
+            .chain(agents::secret_hosts())
+            .collect();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(BASELINE.len(), unique.len(), "every host once");
+        let mut baseline = BALANCED_BASELINE.to_vec();
+        baseline.sort_unstable();
+        baseline.dedup();
         assert_eq!(
-            BASELINE.len(),
-            BALANCED_BASELINE.len() + agents::secret_hosts().len()
+            baseline.len(),
+            BALANCED_BASELINE.len(),
+            "no repeats in the table"
         );
     }
 
@@ -946,7 +996,7 @@ mod tests {
                 "allow *.allowed.test (global)",
             ]
         );
-        assert_eq!(listed[6], "allow api.openai.com (preset)");
+        assert_eq!(listed[6], "allow api.anthropic.com (preset)");
         assert_eq!(policy.rules(None).len(), 4 + BASELINE.len());
         assert_eq!(sample(Preset::LockedDown).rules(None).len(), 4);
     }

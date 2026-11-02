@@ -1,6 +1,7 @@
 mod agents;
 mod app;
 mod attach;
+mod config;
 mod guard;
 mod hostgit;
 mod input;
@@ -56,11 +57,13 @@ enum Command {
         /// Create or start the sandbox, but don't attach; attach later with the same command.
         #[arg(short, long, conflicts_with = "args")]
         detach: bool,
-        /// Arguments passed to the agent, after `--`.
+        /// Arguments for the agent, after `--`: added after its defaults (such as the
+        /// auto-approve flag) when the first starts with `-`, used instead of them otherwise.
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Keep an agent API key in the macOS Keychain, so it need not be exported in every shell.
+    /// Keep an agent API key in the macOS Keychain or the Linux Secret Service (secret-tool), so
+    /// it need not be exported in every shell.
     #[command(subcommand)]
     Secret(SecretAction),
     /// Network policy: which hosts sandboxes may reach (applied live by the msbx proxy).
@@ -76,12 +79,12 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SecretAction {
-    /// Store VAR in the Keychain; `security` prompts for the value, msbx never sees it.
+    /// Store VAR; `security` or `secret-tool` prompts for the value, msbx never sees it.
     Set {
         #[arg(value_parser = secret_var_parser())]
         var: String,
     },
-    /// Remove VAR from the Keychain.
+    /// Remove VAR from the key store.
     Rm {
         #[arg(value_parser = secret_var_parser())]
         var: String,
@@ -197,6 +200,11 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     let dirs = Dirs::from_env()?;
+    // Checked before anything starts, so a typo never half-creates a sandbox (RFC 0002).
+    let config = match &cli.command {
+        None | Some(Command::Agent { .. }) => config::load(&dirs.config_file())?,
+        Some(_) => config::Config::default(),
+    };
     match cli.command {
         None => {
             #[cfg(debug_assertions)]
@@ -227,7 +235,9 @@ async fn run(cli: Cli) -> Result<u8> {
             let policy = policy_cli::require_or_ask(&dirs)?;
             proxy::ensure_running(&dirs).await?;
             let agent = agent.agent();
-            let name = sandbox::ensure(agent, &project, &policy.host_ports, &|note| {
+            let options =
+                config.create_options(agent, policy.host_ports, config::host_memory_mib());
+            let name = sandbox::ensure(agent, &project, &options, &|note| {
                 eprintln!("{note}");
             })
             .await?;
@@ -245,6 +255,7 @@ async fn run(cli: Cli) -> Result<u8> {
                 );
                 return Ok(0);
             }
+            let args = config.launch_args(agent, &args);
             let code = attach::exec(&name, agent.command, &args).await?;
             if let Some(warning) = session.finish()? {
                 eprintln!("{warning}");
@@ -449,19 +460,24 @@ mod tests {
             agent_command(&["msbx", "agent", "codex", "--", "--version"])?,
             (AgentId::Codex, None, vec!["--version".to_owned()])
         );
+        assert_eq!(
+            agent_command(&["msbx", "agent", "docker-agent", "--", "--debug"])?,
+            (AgentId::DockerAgent, None, vec!["--debug".to_owned()])
+        );
         Ok(())
     }
 
     #[test]
     fn unknown_agent_lists_the_valid_agents() -> Result<()> {
-        let error = Cli::try_parse_from(["msbx", "agent", "claude"])
+        let error = Cli::try_parse_from(["msbx", "agent", "amp"])
             .err()
             .context("an unknown agent must not parse")?;
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert!(
-            error
-                .to_string()
-                .contains("[possible values: codex, pi, shell]"),
+            error.to_string().contains(
+                "[possible values: claude, codex, copilot, cursor, devin, docker-agent, \
+                         droid, gemini, kiro, opencode, pi, shell]"
+            ),
             "{error}"
         );
         Ok(())
@@ -487,14 +503,14 @@ mod tests {
 
     #[test]
     fn unknown_secret_var_lists_the_valid_names() -> Result<()> {
-        let error = Cli::try_parse_from(["msbx", "secret", "set", "GITHUB_TOKEN"])
+        let error = Cli::try_parse_from(["msbx", "secret", "set", "MSBX_PROXY_TOKEN"])
             .err()
             .context("an unknown var must not parse")?;
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert!(
             error
                 .to_string()
-                .contains("[possible values: OPENAI_API_KEY]"),
+                .contains("[possible values: ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN,"),
             "{error}"
         );
         Ok(())
