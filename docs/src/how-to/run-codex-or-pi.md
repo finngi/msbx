@@ -54,9 +54,13 @@ part of the sandbox settings, so [remove the sandbox](remove-or-reset.md) and ru
 
 ### Sign in with ChatGPT instead
 
-1. Turn on device code sign-in in your ChatGPT security settings.
-2. Run `msbx agent codex -- login --device-auth` and enter the code it shows.
-3. Run `msbx agent codex` in any project. It starts signed in.
+1. Turn on device code sign-in in your ChatGPT security settings. Without it, the page that
+   takes the code asks you to enable it.
+2. Run `msbx agent codex -- login --device-auth` and enter the code it shows. The browser
+   sign-in that plain `codex login` starts does not work: it sends your browser back to
+   `localhost:1455`, which is inside the VM.
+3. Run `msbx agent codex` in any project. It starts signed in: when the sign-in command exits,
+   msbx moves the new sign-in onto the shared volume.
 
 The sign-in file, `~/.codex/auth.json` in the VM (the agent runs as `node`, so
 `/home/node/.codex/auth.json`), is a link to the `msbx-login-codex` volume, which every Codex

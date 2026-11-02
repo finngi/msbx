@@ -257,6 +257,9 @@ async fn run(cli: Cli) -> Result<u8> {
             }
             let args = config.launch_args(agent, &args);
             let code = attach::exec(&name, agent.command, &args).await?;
+            if let Err(error) = sandbox::relink(&name, agent, &|note| eprintln!("{note}")).await {
+                eprintln!("note: could not share a new sign-in from {name}: {error:#}");
+            }
             if let Some(warning) = session.finish()? {
                 eprintln!("{warning}");
             }

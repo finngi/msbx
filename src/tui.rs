@@ -728,7 +728,7 @@ async fn suspend(
 }
 
 async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
-    let (name, command, args, project) = match foreground {
+    let (name, command, args, project, agent) = match foreground {
         Foreground::Attach {
             name,
             agent,
@@ -738,13 +738,13 @@ async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
             let args = config::load(&dirs.config_file())?.launch_args(agent, &[]);
             proxy::ensure_running(dirs).await?;
             sandbox::prepare_existing(&name, agent, &|note| eprintln!("{note}")).await?;
-            (name, agent.command, args, project)
+            (name, agent.command, args, project, Some(agent))
         }
         Foreground::Exec {
             name,
             command,
             project,
-        } => (name, command, Vec::new(), project),
+        } => (name, command, Vec::new(), project, None),
     };
     // The terminal is the agent's now, so warnings go to stderr like `msbx agent`'s; the status
     // line and the card's badge repeat them once the dashboard is back (RFC 0001).
@@ -759,6 +759,11 @@ async fn run_foreground(foreground: Foreground, dirs: &Dirs) -> Result<String> {
         None => None,
     };
     let code = attach::exec(&name, command, &args).await?;
+    if let Some(agent) = agent
+        && let Err(error) = sandbox::relink(&name, agent, &|note| eprintln!("{note}")).await
+    {
+        eprintln!("note: could not share a new sign-in from {name}: {error:#}");
+    }
     let mut status = format!("exited {name} (code {code})");
     if let Some(warning) = session
         .map(|session| session.finish())

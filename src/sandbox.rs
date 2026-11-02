@@ -319,14 +319,51 @@ async fn prepare(sandbox: &Sandbox, agent: &Agent, name: &str, notify: Notify<'_
              .git/hooks and .git/config; recreate it with `msb rm -f {name}`"
         ));
     }
-    // No user means the image's default user, root.
-    let user = spec.runtime.user.as_deref().unwrap_or("root");
-    install_once(sandbox, agent, name, user, notify).await?;
-    let home = guest_home(sandbox, name, user).await?;
-    let mount = stored_login_mount(&spec.mounts);
-    link_login(sandbox, agent, name, &home, mount, user, notify).await?;
+    install_once(sandbox, agent, name, sandbox_user(sandbox), notify).await?;
+    let home = link_logins(sandbox, agent, name, notify).await?;
     write_models(sandbox, agent, name, &home, notify).await?;
     seed_identity(sandbox, name).await
+}
+
+/// The sandbox's user; no user means the image's default user, root.
+fn sandbox_user(sandbox: &Sandbox) -> &str {
+    sandbox
+        .config()
+        .spec
+        .runtime
+        .user
+        .as_deref()
+        .unwrap_or("root")
+}
+
+/// Links the agent's login files to the shared volume and returns the user's home.
+async fn link_logins(
+    sandbox: &Sandbox,
+    agent: &Agent,
+    name: &str,
+    notify: Notify<'_>,
+) -> Result<String> {
+    let user = sandbox_user(sandbox);
+    let home = guest_home(sandbox, name, user).await?;
+    let mount = stored_login_mount(&sandbox.config().spec.mounts);
+    link_login(sandbox, agent, name, &home, mount, user, notify).await?;
+    Ok(home)
+}
+
+/// After an agent session: moves a sign-in made in it onto the shared volume, so other
+/// sandboxes of the agent see it now rather than at this sandbox's next launch. A fresh sign-in
+/// replaces the link with a plain file (Codex 0.166 `login` deletes `auth.json`, then writes
+/// it). A sandbox that is no longer running is left for its next launch to migrate.
+pub(crate) async fn relink(name: &str, agent: &Agent, notify: Notify<'_>) -> Result<()> {
+    if agent.logins.is_empty() {
+        return Ok(());
+    }
+    let Ok(sandbox) = get(name).await?.connect().await else {
+        return Ok(());
+    };
+    let linked = link_logins(&sandbox, agent, name, notify).await;
+    sandbox.detach().await;
+    linked.map(|_| ())
 }
 
 /// The home folder of `user` in the guest, from its `$HOME` (the image's `/etc/passwd`).
