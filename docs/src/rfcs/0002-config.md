@@ -1,7 +1,21 @@
 # RFC 0002: msbx config file
 
-- Status: Proposed
+- Status: Implemented in part ([RFC 0012](0012-agents-and-defaults.md))
 - Tracking issue: [#7](https://github.com/finngi/msbx/issues/7)
+
+## What is implemented
+
+[RFC 0012](0012-agents-and-defaults.md) built the file, its location
+(`$XDG_CONFIG_HOME/msbx/config.toml`, else `~/.config/msbx/config.toml`), `deny_unknown_fields`
+with line and column errors, and these keys only:
+
+- `[defaults]`: `image`, `cpus` (1 to 255), `memory_mib` (at least 512).
+- `[agents.<id>]` for the `msbx agent` names: `image`, `auto_approve` (default `true`), `args`.
+
+`image`, `cpus` and `memory_mib` apply at create; `auto_approve` and `args` at every launch. An
+absent file means the built-in defaults. Everything else below (`login`, `network`,
+`network_allow`, `host`, `setup`, `[github]`, `[git]`, `[projects."<path>"]`, the token check)
+is still a proposal. `cpus` is not capped at the host's core count.
 
 ## Summary
 

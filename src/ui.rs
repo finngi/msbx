@@ -765,55 +765,60 @@ fn render_create(frame: &mut Frame, app: &App, wizard: &CreateWizard) {
     }
 }
 
+/// One row per agent, scrolled to keep the selection visible, and the selected agent's
+/// credentials in a fixed area below, so twelve agents fit at 60x20.
 fn render_agents(frame: &mut Frame, app: &App, selected: usize) {
-    let inner = popup_area(frame, "New sandbox · 1/2 Choose agent", 78, 17);
-    let [intro, choices, hint] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(0),
+    let title = format!(
+        "New sandbox · 1/2 Choose agent ({}/{})",
+        selected + 1,
+        app.agents.len()
+    );
+    // Leave the header and footer rows visible, as on the dashboard.
+    let height = frame.area().height.saturating_sub(2).min(22);
+    let inner = popup_area(frame, &title, 78, height);
+    let credential = app
+        .credentials
+        .get(selected)
+        .map_or("checking credentials…", String::as_str);
+    let details = credential_lines(credential, inner.width, 3);
+    let details_height = u16::try_from(details.len()).unwrap_or(3).clamp(1, 3);
+    let [intro, choices, _, credentials, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(details_height),
         Constraint::Length(1),
     ])
     .areas(inner);
     frame.render_widget(
-        Paragraph::new("Choose an agent. Credentials are checked on the host.")
-            .wrap(Wrap { trim: false })
-            .dim(),
+        Line::from("Choose an agent. Credentials are checked on the host.").dim(),
         intro,
     );
-    let mut lines = Vec::new();
-    let mut selected_end = 0;
-    for (index, id) in app.agents.iter().enumerate() {
-        let description = crate::agents::find(id).map_or("", |agent| agent.description);
-        let marker = if index == selected { "▸" } else { " " };
-        let mut title = Line::from(truncate_text(
-            &format!("{marker} {id} · {description}"),
-            choices.width,
-        ));
-        if index == selected {
-            title = title.fg(ACCENT).bold();
-        }
-        lines.push(title);
-        let credential = app
-            .credentials
-            .get(index)
-            .map_or("checking credentials…", String::as_str);
-        lines.extend(credential_lines(credential, choices.width, 2));
-        if index == selected {
-            selected_end = lines.len();
-        }
-        lines.push(Line::default());
-    }
-    let visible = usize::from(choices.height);
-    let start = selected_end.saturating_sub(visible);
-    frame.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
-                .skip(start)
-                .take(visible)
-                .collect::<Vec<_>>(),
-        ),
-        choices,
-    );
+    let id_width = app.agents.iter().map(|id| id.len()).max().unwrap_or(0);
+    let visible = usize::from(choices.height).max(1);
+    let start = (selected + 1).saturating_sub(visible);
+    let lines: Vec<Line> = app
+        .agents
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, id)| {
+            let description = crate::agents::find(id).map_or("", |agent| agent.description);
+            let marker = if index == selected { "▸" } else { " " };
+            let line = Line::from(truncate_text(
+                &format!("{marker} {id:<id_width$}  {description}"),
+                choices.width,
+            ));
+            if index == selected {
+                line.fg(ACCENT).bold()
+            } else {
+                line
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), choices);
+    frame.render_widget(Paragraph::new(details), credentials);
     render_footer(frame, app, hint);
 }
 
@@ -1790,7 +1795,7 @@ mod tests {
         let mut app = App::new(
             PathBuf::from("/home/dev/dev/xap/api"),
             Some(PathBuf::from("/home/dev")),
-            vec!["codex", "pi", "shell"],
+            crate::tui::agent_ids(),
             crate::tui::preview_name,
         );
         let running = SandboxInfo {
@@ -1828,11 +1833,21 @@ mod tests {
             network: Some("public + host".to_owned()),
             ..info("scratch", Status::Running)
         };
-        app.credentials = vec![
-            "OPENAI_API_KEY: shell/Keychain available; shared login: missing".into(),
-            "shared login: present".into(),
-            "none required".into(),
-        ];
+        app.credentials = app
+            .agents
+            .iter()
+            .map(|id| match *id {
+                "codex" => "OPENAI_API_KEY: available (shell/Keychain); msbx-login-codex: missing",
+                "copilot" => {
+                    "COPILOT_GITHUB_TOKEN or GH_TOKEN or GITHUB_TOKEN: missing; \
+                     msbx-login-copilot: present"
+                }
+                "pi" => "msbx-login-pi: present",
+                "kiro" | "shell" => "no keys or shared sign-in",
+                _ => "checking credentials…",
+            })
+            .map(str::to_owned)
+            .collect();
         app.set_sandboxes(vec![running, stopped, older]);
         app.set_network(
             Some(Preset::Balanced),
@@ -1890,6 +1905,7 @@ mod tests {
         press(&mut app, crossterm::event::KeyCode::Char('c'));
         if let Some(Popup::Create(wizard)) = &mut app.popup {
             wizard.stage = stage;
+            wizard.agent_index = 1;
             wizard.name.set_text("codex-api");
             wizard.folder.loading = false;
         }
@@ -2347,25 +2363,56 @@ mod tests {
         snapshots("rule_remove_long", &long_rule_confirmation())
     }
 
+    /// The last agent selected, with a credential check that failed at length.
     fn agent_with_long_credential() -> App {
         let mut app = with_wizard(CreateStage::Agent);
-        app.credentials[0] = format!(
-            "shared login: unknown ({})",
+        let last = app.agents.len() - 1;
+        app.credentials[last] = format!(
+            "msbx-login-shell: unknown ({})",
             "long filesystem error ".repeat(30)
         );
         if let Some(Popup::Create(wizard)) = &mut app.popup {
-            wizard.agent_index = 2;
+            wizard.agent_index = last;
         }
         app
     }
 
     #[test]
-    fn selected_agent_is_visible_after_long_credential_errors() -> anyhow::Result<()> {
-        let text = draw(&agent_with_long_credential(), 60, 20)?
+    fn selected_agent_and_its_credentials_stay_visible() -> anyhow::Result<()> {
+        for (width, height) in [(80, 24), (60, 20)] {
+            let text = draw(&agent_with_long_credential(), width, height)?
+                .backend()
+                .to_string();
+            assert!(text.contains("▸ shell"), "{text}");
+            assert!(text.contains("(12/12)"), "{text}");
+            assert!(text.contains("msbx-login-shell: unknown"), "{text}");
+            let error_rows = text
+                .lines()
+                .filter(|row| row.contains("filesystem"))
+                .count();
+            assert_eq!(error_rows, 3, "the error is cut to three rows: {text}");
+        }
+        // Too short for the whole list: it scrolls to keep the selection on screen.
+        let text = draw(&agent_with_long_credential(), 60, 14)?
             .backend()
             .to_string();
         assert!(text.contains("▸ shell"), "{text}");
-        assert!(text.contains("none required"), "{text}");
+        assert!(!text.contains(" claude "), "{text}");
+        Ok(())
+    }
+
+    #[test]
+    fn agent_list_shows_every_agent_with_several_credential_vars() -> anyhow::Result<()> {
+        let mut app = with_wizard(CreateStage::Agent);
+        if let Some(Popup::Create(wizard)) = &mut app.popup {
+            wizard.agent_index = 2;
+        }
+        let text = draw(&app, 80, 24)?.backend().to_string();
+        for id in crate::tui::agent_ids() {
+            assert!(text.contains(id), "missing {id}: {text}");
+        }
+        assert!(text.contains("▸ copilot"), "{text}");
+        assert!(text.contains("COPILOT_GITHUB_TOKEN or GH_TOKEN or GITHUB_TOKEN: missing"));
         Ok(())
     }
 

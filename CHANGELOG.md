@@ -10,6 +10,11 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Added
 
+- Agents (RFC 0012): `claude`, `copilot`, `cursor`, `devin`, `docker-agent`, `droid`, `gemini`, `kiro` and `opencode` join `codex`, `pi` and `shell`, with Docker Sandboxes' names. Each is installed in the VM at create from its vendor's npm package (pinned), release (SHA-256 checked) or install script, and gets its API keys (several per agent, any one enough) sent only to its vendor's hosts, and shared sign-in files where they could be found (Claude Code shares two files; Kiro has none).
+- `~/.config/msbx/config.toml` (part of RFC 0002): `[defaults]` `image`, `cpus`, `memory_mib`, and `[agents.<id>]` `image`, `auto_approve`, `args`. Unknown keys and bad values stop msbx with the line and column.
+- `msbx secret set|rm` on Linux, through the freedesktop Secret Service (`secret-tool`, attributes `service msbx account VAR`); startup reads stored keys there too.
+- Other Debian or Ubuntu images: the install adds missing base packages, a uid 1000 `node` account and Node.js 24.22.2 when an npm agent needs it.
+
 - Dashboard create wizard with agent descriptions, credential availability, an editable name and a workspace folder picker.
 - Expandable network rows with endpoint history and allowed/blocked counts; `n` opens traffic across all sandboxes with search, status and sandbox filters.
 - Dashboard Rules view with preset, global and sandbox rules; add rules or confirm removal of explicit rules.
@@ -38,6 +43,11 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Changed
 
+- Agents start with their skip-permission-prompts flag, as in Docker Sandboxes (`claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, `gemini --approval-mode=yolo`, …); `auto_approve = false` in `config.toml` turns it off per agent. Arguments after `--` follow the defaults when they start with `-` and replace them when they start with a word, like `sbx run`.
+- New sandboxes boot `node:24-bookworm` (was `-slim`; adds Python 3, gcc and make) with half the host's memory, at least 512 MiB and at most 32 GiB (was a fixed 32 GiB), and set the agent user by uid (1000), so images without a `node` user can boot. Codex is now 0.166.0.
+- The `balanced` preset also allows the agents' install and sign-in hosts and `nodejs.org`, and lists each host once.
+- The create wizard lists one row per agent, scrolls to the selection and shows the selected agent's credentials below the list.
+
 - Dashboard navigation: `Tab` and horizontal arrows switch panes, vertical arrows move within the focused pane, and `[` / `]` change detail tabs. Network blocking uses `b`.
 
 - Creating a sandbox from the dashboard no longer attaches. The dashboard stays open, shows progress on the status line and selects the new card; press `Enter` to attach.
@@ -48,6 +58,7 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Fixed
 
+- `msbx agent pi` on a new sandbox failed with `mkdir: cannot create directory '/home/node/.pi': Permission denied`: folders above the login file were left owned by root. Existing sandboxes are repaired on the next launch.
 - `msbx proxy stop` no longer drops connections logged just before it stopped.
 
 [unreleased]: https://github.com/finngi/msbx/commits/main

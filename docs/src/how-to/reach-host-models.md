@@ -6,7 +6,7 @@ is reachable.
 
 ## pi: no setup needed
 
-Each time `msbx agent pi` starts, msbx writes `/root/.pi/agent/models.json` in the VM:
+Each time `msbx agent pi` starts, msbx writes `~/.pi/agent/models.json` in the VM:
 
 1. If you have `~/.pi/agent/models.json` on the host (or `$PI_CODING_AGENT_DIR/models.json`),
    msbx copies the providers whose `baseUrl` host is `127.0.0.1`, `localhost`, `[::1]` or
@@ -43,6 +43,19 @@ run `msbx agent pi` again after starting it.
    ```
 
 3. Use `http://host.microsandbox.internal:1234/v1` as the agent's OpenAI-compatible base URL.
+
+## Other agents
+
+msbx sets up only pi for local models so far. Several other agents can use the same servers
+once you point them at `host.microsandbox.internal`, for example (check each vendor's docs):
+
+- Claude Code: `ANTHROPIC_BASE_URL=http://host.microsandbox.internal:11434` for Ollama
+  ([Ollama's guide](https://docs.ollama.com/integrations/claude-code)) or port 1234 for LM
+  Studio ([LM Studio's guide](https://lmstudio.ai/docs/integrations/claude-code)), set in the
+  `env` block of `~/.claude/settings.json` inside the Claude sandbox.
+- Codex: `codex --oss` with Ollama ([Ollama's guide](https://docs.ollama.com/integrations/codex)).
+- OpenCode: an OpenAI-compatible provider in its config
+  ([providers](https://opencode.ai/docs/providers/)).
 
 ## If it does not connect
 

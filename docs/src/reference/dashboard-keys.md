@@ -111,10 +111,13 @@ rule reloads the proxy policy for subsequent connections.
 
 ## Create wizard
 
-Choose Codex, pi or shell from the agent list. Each has a description and credential summary:
-Codex reports `OPENAI_API_KEY` availability from the shell or macOS Keychain and shared login
-presence; pi reports shared login presence; shell needs no credentials. Presence does not
-prove a credential is valid, and values are never displayed.
+Choose one of the twelve [agents](agents.md), one row each with a short description. The list
+scrolls to keep the selection visible, and the title shows its position (`2/12`). Below the
+list, the selected agent's credential summary names the API key variables that are set in the
+shell, Keychain or Secret Service (`GH_TOKEN, GITHUB_TOKEN: available`) or, when none is, all
+of them (`COPILOT_GITHUB_TOKEN or GH_TOKEN or GITHUB_TOKEN: missing`; any one is enough), and
+whether its shared sign-in volume holds a sign-in. Agents with neither say `no keys or shared
+sign-in`. Presence does not prove a credential is valid, and values are never displayed.
 
 Continue to configure the name and workspace. The name defaults to `<agent>-<folder>`; editing
 it preserves your choice when the folder changes. Names use lowercase ASCII letters, digits
