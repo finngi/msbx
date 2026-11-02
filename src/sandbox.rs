@@ -69,6 +69,13 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Lines of install output kept in the error when the one-time install fails.
 const INSTALL_ERROR_LINES: usize = 40;
 
+/// The name the guest and the Mac both look up to tell whether the guest's DNS still works.
+/// Reserved by IANA for examples, so any network with working DNS resolves it.
+const DNS_PROBE_HOST: &str = "example.com";
+
+/// Long enough for a slow but working resolver, short enough to keep attaching quick.
+const DNS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Points the SDK at the runtime behind the `msb` found on `PATH`.
 ///
 /// The SDK only discovers its runtime through `MSB_PATH` or `~/.microsandbox/bin`. Homebrew
@@ -172,7 +179,7 @@ async fn ensure_with_mode(
     let project_path = project
         .to_str()
         .with_context(|| format!("project path {} is not valid UTF-8", project.display()))?;
-    check_existing(mode, name, agent.id, project_path).await?;
+    let was_running = check_existing(mode, name, agent.id, project_path).await?;
     let login_volume = login_volume(agent);
     if let Some(volume) = &login_volume {
         ensure_login_volume(volume, agent.id).await?;
@@ -265,6 +272,12 @@ async fn ensure_with_mode(
         ExistingMode::Reuse => builder.connect_or_create().await,
     }
     .with_context(|| format!("starting sandbox {name}"))?;
+    // Boxed: the restart's awaits would push this future past clippy's stack budget.
+    let sandbox = if was_running {
+        Box::pin(restart_if_dns_stale(sandbox, name, notify)).await?
+    } else {
+        sandbox
+    };
 
     let prepared = prepare(&sandbox, agent, name, notify).await;
     // A detached sandbox's handle never owns the VM, so releasing it leaves the VM running.
@@ -299,14 +312,77 @@ fn proxied_policy(host_ports: &[u16]) -> Result<NetworkPolicy> {
 /// the TUI's attach, which skips `ensure`.
 pub(crate) async fn prepare_existing(name: &str, agent: &Agent, notify: Notify<'_>) -> Result<()> {
     ensure_login_volume_for(name).await?;
-    let sandbox = get(name)
-        .await?
+    let handle = get(name).await?;
+    let was_running = handle.status_snapshot() == SandboxStatus::Running;
+    let sandbox = handle
         .connect_or_start_detached()
         .await
         .with_context(|| format!("connecting to sandbox {name}"))?;
+    let sandbox = if was_running {
+        Box::pin(restart_if_dns_stale(sandbox, name, notify)).await?
+    } else {
+        sandbox
+    };
     let prepared = prepare(&sandbox, agent, name, notify).await;
     sandbox.detach().await;
     prepared
+}
+
+/// What a lookup of [`DNS_PROBE_HOST`] inside the guest showed.
+#[derive(Debug, PartialEq, Eq)]
+enum GuestDns {
+    Works,
+    Fails,
+    /// The lookup could not run, so it says nothing about DNS.
+    Unknown,
+}
+
+/// Reads the exit code (or error) of `getent hosts` in the guest.
+fn guest_dns(probe: Result<i32, &MicrosandboxError>) -> GuestDns {
+    match probe {
+        Ok(0) => GuestDns::Works,
+        Ok(_) | Err(MicrosandboxError::ExecTimeout(_)) => GuestDns::Fails,
+        Err(_) => GuestDns::Unknown,
+    }
+}
+
+async fn probe_guest_dns(sandbox: &Sandbox) -> GuestDns {
+    let probe = sandbox
+        .exec_with("getent", |exec| {
+            exec.args(["hosts", DNS_PROBE_HOST])
+                .timeout(DNS_PROBE_TIMEOUT)
+        })
+        .await;
+    guest_dns(probe.as_ref().map(|output| output.status().code))
+}
+
+async fn host_resolves(host: &str) -> bool {
+    match tokio::time::timeout(DNS_PROBE_TIMEOUT, tokio::net::lookup_host((host, 443))).await {
+        Ok(Ok(mut addresses)) => addresses.next().is_some(),
+        _ => false,
+    }
+}
+
+/// Restarts a running sandbox whose DNS stopped working because the Mac changed network since
+/// it booted: microsandbox reads the host's resolvers once, at boot (microsandbox-network 0.7.11
+/// `DnsForwarder::build`), and keeps forwarding to them. The guest failing while the Mac
+/// resolves the same name rules out a Mac that is simply offline. Starting it from msbx keeps
+/// the proxy token in the environment the SDK reads at boot.
+async fn restart_if_dns_stale(sandbox: Sandbox, name: &str, notify: Notify<'_>) -> Result<Sandbox> {
+    if probe_guest_dns(&sandbox).await != GuestDns::Fails || !host_resolves(DNS_PROBE_HOST).await {
+        return Ok(sandbox);
+    }
+    notify(format!(
+        "note: {name} cannot look up host names since your Mac changed network; restarting it"
+    ));
+    sandbox
+        .stop_with_timeout(STOP_TIMEOUT)
+        .await
+        .with_context(|| format!("stopping sandbox {name}"))?;
+    sandbox.detach().await;
+    Sandbox::start_detached(name)
+        .await
+        .with_context(|| format!("starting sandbox {name}"))
 }
 
 /// Readies a connected sandbox for the agent. Paths come from the sandbox's stored config, so a
@@ -625,11 +701,16 @@ fn models_script(guest_path: &str) -> String {
 }
 
 /// Two folders with the same name map to the same sandbox; refuse to hand one project's
-/// sandbox (and its mount) to another.
-async fn check_existing(mode: ExistingMode, name: &str, agent: &str, project: &str) -> Result<()> {
+/// sandbox (and its mount) to another. Returns whether the sandbox is already running.
+async fn check_existing(
+    mode: ExistingMode,
+    name: &str,
+    agent: &str,
+    project: &str,
+) -> Result<bool> {
     let handle = match Sandbox::get(name).await {
         Ok(handle) => handle,
-        Err(MicrosandboxError::SandboxNotFound(_)) => return Ok(()),
+        Err(MicrosandboxError::SandboxNotFound(_)) => return Ok(false),
         Err(error) => return Err(error).with_context(|| format!("looking up sandbox {name}")),
     };
     let config = handle
@@ -642,7 +723,8 @@ async fn check_existing(mode: ExistingMode, name: &str, agent: &str, project: &s
         project,
         config.spec.labels.get(LABEL_AGENT).map(String::as_str),
         config.spec.labels.get(LABEL_PROJECT).map(String::as_str),
-    )
+    )?;
+    Ok(handle.status_snapshot() == SandboxStatus::Running)
 }
 
 fn check_identity(
@@ -1358,6 +1440,51 @@ mod tests {
         let on_host = std::fs::read_to_string(project.join("written-in-vm.txt"))?;
         assert_eq!(on_host.trim(), "from-guest");
         std::fs::remove_dir_all(project.parent().context("temp project has a parent")?)?;
+        Ok(())
+    }
+
+    #[test]
+    fn guest_dns_fails_only_when_the_lookup_ran_and_found_nothing() {
+        assert_eq!(guest_dns(Ok(0)), GuestDns::Works);
+        // getent's "not found", which is also what a SERVFAIL from the forwarder becomes.
+        assert_eq!(guest_dns(Ok(2)), GuestDns::Fails);
+        let timeout = MicrosandboxError::ExecTimeout(DNS_PROBE_TIMEOUT);
+        assert_eq!(guest_dns(Err(&timeout)), GuestDns::Fails);
+        // No getent in the image, or no agent to run it: nothing learnt, so no restart.
+        let other = MicrosandboxError::SandboxNotFound("box".to_owned());
+        assert_eq!(guest_dns(Err(&other)), GuestDns::Unknown);
+    }
+
+    /// Boots a real VM without the msbx proxy: `cargo test -- --ignored stale_dns`. Pointing the
+    /// guest at a resolver that never answers stands in for a forwarder still using the
+    /// resolvers of the network the Mac has left.
+    #[tokio::test]
+    #[ignore = "boots a real microVM; needs msb on PATH and network access"]
+    async fn stale_dns_restarts_the_sandbox() -> Result<()> {
+        use_runtime(&crate::attach::msb_path()?);
+        let name = format!("msbx-dns-it-{}", std::process::id());
+        let sandbox = Sandbox::builder(&name)
+            .image(agents::IMAGE)
+            .detached(true)
+            .create()
+            .await?;
+        let outcome = Box::pin(async {
+            // 192.0.2.1 is TEST-NET-1 (RFC 5737), which nothing answers.
+            let broken = sandbox
+                .shell_with("echo 'nameserver 192.0.2.1' > /etc/resolv.conf", |exec| {
+                    exec.user("root")
+                })
+                .await?;
+            anyhow::ensure!(broken.status().success, "could not break the guest's DNS");
+            anyhow::ensure!(probe_guest_dns(&sandbox).await == GuestDns::Fails);
+            let restarted = restart_if_dns_stale(sandbox, &name, &print_note).await?;
+            let after = probe_guest_dns(&restarted).await;
+            restarted.detach().await;
+            anyhow::Ok(after)
+        })
+        .await;
+        remove(&name).await?;
+        assert_eq!(outcome?, GuestDns::Works);
         Ok(())
     }
 

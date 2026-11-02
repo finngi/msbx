@@ -41,6 +41,8 @@ Behaviour:
    characters outside `a-z0-9` becomes one `-`, and the name is cut to 128 bytes.
 3. If a sandbox with that name exists for the same folder, it is started if needed and reused.
    If it exists for a different folder, or was not created by msbx, msbx stops with an error.
+   If it was already running and cannot look up `example.com` while your Mac can, msbx restarts
+   it so it picks up your Mac's current DNS servers ([Troubleshoot](../how-to/troubleshoot.md)).
 4. Otherwise it is created with the [sandbox defaults](sandbox-defaults.md) and
    `config.toml`'s image, CPUs and memory, including the proxy and the git guard mounts.
 5. On first use the agent is installed in the VM ([First-use install](sandbox-defaults.md#first-use-install);

@@ -13,6 +13,7 @@
 - [Control network access](how-to/control-network-access.md)
 - [Keep git on your Mac safe from the agent](how-to/guard-git.md)
 - [Remove or reset a sandbox](how-to/remove-or-reset.md)
+- [Troubleshoot](how-to/troubleshoot.md)
 
 # Reference
 
