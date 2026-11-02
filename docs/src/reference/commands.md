@@ -199,5 +199,12 @@ Use `msbx <COMMAND> --help` for `msb`'s help on a command.
 
 ## Finding `msb`
 
-msbx uses the first `msb` on your `PATH`. If there is none, it exits with
-`msb not found — install microsandbox: brew install superradcompany/tap/microsandbox`.
+msbx runs the same `msb` the microsandbox SDK uses, found in the SDK's order:
+
+1. `MSB_PATH`, when set
+2. `bin/msb` in `$MSB_HOME`, or in `~/.microsandbox`, where the official installer puts it
+3. the first `msb` on your `PATH`, such as Homebrew's
+
+So `msbx ls` and attaching use the runtime that wrote the database, even when an older `msb`
+comes first on your `PATH`. If none is found, msbx exits with
+`msb not found — install microsandbox: curl -fsSL https://install.microsandbox.dev | sh`.

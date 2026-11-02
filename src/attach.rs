@@ -12,11 +12,45 @@ use std::process::ExitStatus;
 use anyhow::{Context, Result};
 
 const MSB_MISSING: &str =
-    "msb not found — install microsandbox: brew install superradcompany/tap/microsandbox";
+    "msb not found — install microsandbox: curl -fsSL https://install.microsandbox.dev | sh";
 
-/// The `msb` executable on `PATH`.
+/// The `msb` msbx runs and points the SDK at, in the SDK's own order (microsandbox 0.7.13
+/// `setup/runtime.rs` `resolve_runtime_candidates`): `MSB_PATH`, then the runtime in
+/// `$MSB_HOME` or `~/.microsandbox` that the official installer writes, then `msb` on `PATH`
+/// (Homebrew). Running the same `msb` as the SDK keeps `msb exec` on the database format the
+/// SDK writes.
 pub(crate) fn msb_path() -> Result<PathBuf> {
-    let path = std::env::var_os("PATH").context(MSB_MISSING)?;
+    resolve_msb(
+        std::env::var_os("MSB_PATH"),
+        msb_home(),
+        std::env::var_os("PATH"),
+    )
+}
+
+/// `$MSB_HOME`, or `~/.microsandbox` (microsandbox-utils 0.7.13 `resolve_home`); an empty
+/// `MSB_HOME` counts as unset.
+fn msb_home() -> Option<PathBuf> {
+    std::env::var_os("MSB_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".microsandbox")))
+}
+
+fn resolve_msb(
+    msb_path: Option<OsString>,
+    home: Option<PathBuf>,
+    path: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(msb) = msb_path.filter(|msb| !msb.is_empty()) {
+        return Ok(PathBuf::from(msb));
+    }
+    if let Some(msb) = home
+        .map(|home| home.join("bin").join("msb"))
+        .filter(|msb| msb.is_file())
+    {
+        return Ok(msb);
+    }
+    let path = path.context(MSB_MISSING)?;
     std::env::split_paths(&path)
         .map(|dir| dir.join("msb"))
         .find(|candidate| candidate.is_file())
@@ -95,6 +129,43 @@ fn exit_code(status: ExitStatus) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msb_is_found_in_the_sdks_order() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("msbx-msb-path-{}", std::process::id()));
+        let home = root.join("home");
+        let on_path = root.join("path");
+        std::fs::create_dir_all(home.join("bin"))?;
+        std::fs::create_dir_all(&on_path)?;
+        std::fs::write(on_path.join("msb"), "")?;
+        let path = Some(on_path.clone().into_os_string());
+        let outcome = (|| -> Result<()> {
+            assert_eq!(
+                resolve_msb(None, Some(home.clone()), path.clone())?,
+                on_path.join("msb"),
+                "no home runtime: PATH"
+            );
+            std::fs::write(home.join("bin/msb"), "")?;
+            assert_eq!(
+                resolve_msb(None, Some(home.clone()), path.clone())?,
+                home.join("bin/msb"),
+                "the installer's runtime beats PATH, as in the SDK"
+            );
+            assert_eq!(
+                resolve_msb(Some("/opt/msb".into()), Some(home.clone()), path.clone())?,
+                PathBuf::from("/opt/msb")
+            );
+            assert_eq!(
+                resolve_msb(Some("".into()), Some(home.clone()), path.clone())?,
+                home.join("bin/msb"),
+                "an empty MSB_PATH counts as unset"
+            );
+            assert!(resolve_msb(None, None, None).is_err());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(&root)?;
+        outcome
+    }
 
     #[test]
     fn exec_args_put_the_command_after_the_separator() {
