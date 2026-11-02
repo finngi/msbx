@@ -58,6 +58,7 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Fixed
 
+- A sandbox left running while the Mac changed network could no longer resolve host names, because microsandbox keeps the DNS servers it read at boot. `msbx agent` and the dashboard's attach now check DNS in a running sandbox first and restart it when the Mac resolves but the sandbox does not.
 - `msbx agent pi` on a new sandbox failed with `mkdir: cannot create directory '/home/node/.pi': Permission denied`: folders above the login file were left owned by root. Existing sandboxes are repaired on the next launch.
 - `msbx proxy stop` no longer drops connections logged just before it stopped.
 
