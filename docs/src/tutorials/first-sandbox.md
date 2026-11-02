@@ -9,8 +9,8 @@ You need macOS on Apple Silicon or Linux with KVM, Homebrew, and Rust (1.88 or n
 ## 1. Install microsandbox and msbx
 
 ```sh
-brew install superradcompany/tap/microsandbox
-msb --version          # msb 0.7.11
+curl -fsSL https://install.microsandbox.dev | sh
+~/.microsandbox/bin/msb --version      # msb 0.7.13
 cargo install --git https://github.com/finngi/msbx
 msbx --version
 ```

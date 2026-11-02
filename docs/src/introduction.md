@@ -37,7 +37,7 @@ The pages follow [Diátaxis](https://diataxis.fr/):
 ## Requirements
 
 - macOS on Apple Silicon, or Linux with KVM enabled (microsandbox's requirements).
-- microsandbox 0.7.11, the version msbx's SDK is pinned to.
+- microsandbox 0.7.13, the version msbx's SDK is pinned to.
 - Rust stable (1.88 or newer) to build msbx.
 
 Windows is supported by microsandbox but untested with msbx.

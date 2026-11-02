@@ -43,6 +43,7 @@ Before 1.0.0, minor versions may contain breaking changes.
 
 ### Changed
 
+- microsandbox 0.7.13 (from 0.7.11). msbx now runs the same `msb` the SDK uses: `MSB_PATH`, then the official installer's `~/.microsandbox/bin/msb`, then `msb` on `PATH`. Before, it always used the `msb` on `PATH`, which broke once a newer microsandbox had upgraded the database.
 - Agents start with their skip-permission-prompts flag, as in Docker Sandboxes (`claude --dangerously-skip-permissions`, `codex --dangerously-bypass-approvals-and-sandbox`, `gemini --approval-mode=yolo`, …); `auto_approve = false` in `config.toml` turns it off per agent. Arguments after `--` follow the defaults when they start with `-` and replace them when they start with a word, like `sbx run`.
 - New sandboxes boot `node:24-bookworm` (was `-slim`; adds Python 3, gcc and make) with half the host's memory, at least 512 MiB and at most 32 GiB (was a fixed 32 GiB), and set the agent user by uid (1000), so images without a `node` user can boot. Codex is now 0.166.0.
 - The `balanced` preset also allows the agents' install and sign-in hosts and `nodejs.org`, and lists each host once.

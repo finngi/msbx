@@ -17,10 +17,10 @@ If a feature belongs in the runtime, the SDK or `msb` itself, propose it upstrea
 ## Development setup
 
 1. Install Rust with [rustup](https://rustup.rs) (directly or through [mise](https://mise.jdx.dev)). rustup reads `rust-toolchain.toml` and installs the pinned channel with `rustfmt` and `clippy`.
-2. Install microsandbox 0.7.11, which matches the SDK version msbx is pinned to:
+2. Install microsandbox 0.7.13, which matches the SDK version msbx is pinned to:
    ```sh
-   brew install superradcompany/tap/microsandbox
-   msb --version
+   curl -fsSL https://install.microsandbox.dev | sh
+   ~/.microsandbox/bin/msb --version
    ```
    You need macOS on Apple Silicon or Linux with KVM to run sandboxes. Building and the default tests do not need either.
 3. Build and run:

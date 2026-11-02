@@ -36,9 +36,10 @@ msbx is a thin open layer on top. It adds only what `msb` lacks: a TUI and a sin
 ## Requirements
 
 - macOS on Apple Silicon, or Linux with KVM enabled (microsandbox's requirements)
-- [microsandbox](https://github.com/superradcompany/microsandbox) 0.7.11:
+- [microsandbox](https://github.com/superradcompany/microsandbox) 0.7.13, from its installer
+  (Homebrew still ships 0.7.11):
   ```sh
-  brew install superradcompany/tap/microsandbox
+  curl -fsSL https://install.microsandbox.dev | sh
   ```
 - Rust stable (1.88 or newer) to build
 
@@ -215,7 +216,7 @@ Report msbx vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Relationship to microsandbox
 
-msbx uses an unmodified microsandbox: the Rust SDK (pinned to 0.7.11) and the `msb` CLI (for attaching and pass-through).
+msbx uses an unmodified microsandbox: the Rust SDK (pinned to 0.7.13) and the `msb` CLI (for attaching and pass-through).
 
 msbx keeps no list of `msb` commands. It hands anything it does not define to whichever `msb` is on your `PATH`, so new `msb` commands work through msbx as soon as microsandbox ships them.
 
